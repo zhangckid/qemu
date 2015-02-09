@@ -434,6 +434,8 @@
 #
 # @completed: migration is finished.
 #
+# @colo: VM is in the process of fault tolerance. (since 2.6)
+#
 # @failed: some error occurred during migration process.
 #
 # Since: 2.3
@@ -441,7 +443,7 @@
 ##
 { 'enum': 'MigrationStatus',
   'data': [ 'none', 'setup', 'cancelling', 'cancelled',
-            'active', 'postcopy-active', 'completed', 'failed' ] }
+            'active', 'postcopy-active', 'completed', 'failed', 'colo' ] }
 
 ##
 # @MigrationInfo
