@@ -17,6 +17,7 @@
 #include "trace.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "migration/failover.h"
 
 /* colo buffer */
 #define COLO_BUFFER_BASE_SIZE (4 * 1024 * 1024)
