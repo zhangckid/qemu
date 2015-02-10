@@ -360,4 +360,8 @@ uint64_t ram_pagesize_summary(void);
 PostcopyState postcopy_state_get(void);
 /* Set the state and return the old state */
 PostcopyState postcopy_state_set(PostcopyState new_state);
+
+/* ram cache */
+int colo_init_ram_cache(void);
+void colo_release_ram_cache(void);
 #endif
