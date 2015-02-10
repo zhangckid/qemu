@@ -1187,12 +1187,14 @@
 #
 # @vmstate-loaded: VM's state has been loaded by SVM.
 #
+# @guest-shutdown: shutdown requested from PVM to SVM. (Since 2.9)
+#
 # Since: 2.8
 ##
 { 'enum': 'COLOMessage',
   'data': [ 'checkpoint-ready', 'checkpoint-request', 'checkpoint-reply',
             'vmstate-send', 'vmstate-size', 'vmstate-received',
-            'vmstate-loaded' ] }
+            'vmstate-loaded', 'guest-shutdown' ] }
 
 ##
 # @COLOMode:

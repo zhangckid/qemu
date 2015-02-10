@@ -1611,6 +1611,8 @@ static NotifierList wakeup_notifiers =
     NOTIFIER_LIST_INITIALIZER(wakeup_notifiers);
 static uint32_t wakeup_reason_mask = ~(1 << QEMU_WAKEUP_REASON_NONE);
 
+int colo_shutdown_requested;
+
 int qemu_shutdown_requested_get(void)
 {
     return shutdown_requested;
@@ -1737,7 +1739,10 @@ void qemu_system_guest_panicked(GuestPanicInformation *info)
 void qemu_system_reset_request(void)
 {
     if (no_reboot) {
-        shutdown_requested = 1;
+        qemu_system_shutdown_request();
+        if (!shutdown_requested) {/* colo handle it ? */
+            return;
+        }
     } else {
         reset_requested = 1;
     }
@@ -1810,12 +1815,20 @@ void qemu_system_killed(int signal, pid_t pid)
     qemu_notify_event();
 }
 
-void qemu_system_shutdown_request(void)
+void qemu_system_shutdown_request_core(void)
 {
-    trace_qemu_system_shutdown_request();
     replay_shutdown_request();
     shutdown_requested = 1;
     qemu_notify_event();
+}
+
+void qemu_system_shutdown_request(void)
+{
+    trace_qemu_system_shutdown_request();
+    if (colo_handle_shutdown()) {
+        return;
+    }
+    qemu_system_shutdown_request_core();
 }
 
 static void qemu_system_powerdown(void)

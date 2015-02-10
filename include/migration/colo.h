@@ -37,4 +37,5 @@ COLOMode get_colo_mode(void);
 void colo_do_failover(MigrationState *s);
 
 void colo_checkpoint_notify(void *opaque);
+bool colo_handle_shutdown(void);
 #endif
