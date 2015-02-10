@@ -2602,6 +2602,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
     bool postcopy_running = postcopy_state_get() >= POSTCOPY_INCOMING_LISTENING;
     /* ADVISE is earlier, it shows the source has the postcopy capability on */
     bool postcopy_advised = postcopy_state_get() >= POSTCOPY_INCOMING_ADVISE;
+    bool need_flush = false;
 
     seq_iter++;
 
@@ -2636,6 +2637,7 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
             /* After going into COLO, we should load the Page into colo_cache */
             if (migration_incoming_in_colo_state()) {
                 host = colo_cache_from_block_offset(block, addr);
+                need_flush = true;
             } else {
                 host = host_from_ram_block_offset(block, addr);
             }
@@ -2742,6 +2744,10 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
     wait_for_decompress_done();
     rcu_read_unlock();
     trace_ram_load_complete(ret, seq_iter);
+
+    if (!ret  && ram_cache_enable && need_flush) {
+        colo_flush_ram_cache();
+    }
     return ret;
 }
 
@@ -2808,6 +2814,40 @@ void colo_release_ram_cache(void)
         }
     }
     rcu_read_unlock();
+}
+
+/*
+ * Flush content of RAM cache into SVM's memory.
+ * Only flush the pages that be dirtied by PVM or SVM or both.
+ */
+void colo_flush_ram_cache(void)
+{
+    RAMBlock *block = NULL;
+    void *dst_host;
+    void *src_host;
+    unsigned long offset = 0;
+
+    trace_colo_flush_ram_cache_begin(ram_state.migration_dirty_pages);
+    rcu_read_lock();
+    block = QLIST_FIRST_RCU(&ram_list.blocks);
+
+    while (block) {
+        offset = migration_bitmap_find_dirty(&ram_state, block, offset);
+        migration_bitmap_clear_dirty(&ram_state, block, offset);
+
+        if (offset << TARGET_PAGE_BITS >= block->used_length) {
+            offset = 0;
+            block = QLIST_NEXT_RCU(block, next);
+        } else {
+            dst_host = block->host + (offset << TARGET_PAGE_BITS);
+            src_host = block->colo_cache + (offset << TARGET_PAGE_BITS);
+            memcpy(dst_host, src_host, TARGET_PAGE_SIZE);
+        }
+    }
+
+    rcu_read_unlock();
+    trace_colo_flush_ram_cache_end();
+    assert(ram_state.migration_dirty_pages == 0);
 }
 
 static SaveVMHandlers savevm_ram_handlers = {
