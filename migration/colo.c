@@ -601,6 +601,7 @@ void *colo_process_incoming_thread(void *opaque)
     uint64_t total_size;
     uint64_t value;
     Error *local_err = NULL;
+    int ret;
 
     qemu_sem_init(&mis->colo_incoming_sem, 0);
 
@@ -753,10 +754,11 @@ out:
     if (fb) {
         qemu_fclose(fb);
     }
-
-    /* Hope this not to be too long to loop here */
+ 
+   /* Hope this not to be too long to loop here */
     qemu_sem_wait(&mis->colo_incoming_sem);
     qemu_sem_destroy(&mis->colo_incoming_sem);
+
     /* Must be called after failover BH is completed */
     if (mis->to_src_file) {
         qemu_fclose(mis->to_src_file);
