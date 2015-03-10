@@ -3789,6 +3789,7 @@ Set migration parameters
                            throttled for auto-converge (json-int)
 - "x-cpu-throttle-increment": set throttle increasing percentage for
                              auto-converge (json-int)
+- "x-checkpoint-delay": set the delay time for periodic checkpoint (json-int)
 
 Arguments:
 
@@ -3802,7 +3803,7 @@ EQMP
     {
         .name       = "migrate-set-parameters",
         .args_type  =
-            "compress-level:i?,compress-threads:i?,decompress-threads:i?,x-cpu-throttle-initial:i?,x-cpu-throttle-increment:i?",
+            "compress-level:i?,compress-threads:i?,decompress-threads:i?,x-cpu-throttle-initial:i?,x-cpu-throttle-increment:i?,x-checkpoint-delay:i?",
         .mhandler.cmd_new = qmp_marshal_migrate_set_parameters,
     },
 SQMP

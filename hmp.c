@@ -286,6 +286,9 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, " %s: %" PRId64,
             MigrationParameter_lookup[MIGRATION_PARAMETER_X_CPU_THROTTLE_INCREMENT],
             params->x_cpu_throttle_increment);
+        monitor_printf(mon, " %s: %" PRId64,
+            MigrationParameter_lookup[MIGRATION_PARAMETER_X_CHECKPOINT_DELAY],
+            params->x_checkpoint_delay);
         monitor_printf(mon, "\n");
     }
 
@@ -1242,6 +1245,7 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
     bool has_decompress_threads = false;
     bool has_x_cpu_throttle_initial = false;
     bool has_x_cpu_throttle_increment = false;
+    bool has_x_checkpoint_delay = false;
     int i;
 
     for (i = 0; i < MIGRATION_PARAMETER__MAX; i++) {
@@ -1261,6 +1265,8 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
                 break;
             case MIGRATION_PARAMETER_X_CPU_THROTTLE_INCREMENT:
                 has_x_cpu_throttle_increment = true;
+            case MIGRATION_PARAMETER_X_CHECKPOINT_DELAY:
+                has_x_checkpoint_delay = true;
                 break;
             }
             qmp_migrate_set_parameters(has_compress_level, value,
@@ -1268,6 +1274,7 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
                                        has_decompress_threads, value,
                                        has_x_cpu_throttle_initial, value,
                                        has_x_cpu_throttle_increment, value,
+                                       has_x_checkpoint_delay, value,
                                        &err);
             break;
         }
