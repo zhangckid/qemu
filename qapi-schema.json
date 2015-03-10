@@ -625,11 +625,16 @@
 # @x-cpu-throttle-increment: throttle percentage increase each time
 #                            auto-converge detects that migration is not making
 #                            progress. The default value is 10. (Since 2.5)
+#
+# @checkpoint-delay: The delay time (in ms) between two COLO checkpoints in
+#          periodic mode. (Since 2.6)
+#
 # Since: 2.4
 ##
 { 'enum': 'MigrationParameter',
   'data': ['compress-level', 'compress-threads', 'decompress-threads',
-           'x-cpu-throttle-initial', 'x-cpu-throttle-increment'] }
+           'x-cpu-throttle-initial', 'x-cpu-throttle-increment',
+           'checkpoint-delay' ] }
 
 #
 # @migrate-set-parameters
@@ -649,6 +654,9 @@
 # @x-cpu-throttle-increment: throttle percentage increase each time
 #                            auto-converge detects that migration is not making
 #                            progress. The default value is 10. (Since 2.5)
+#
+# @checkpoint-delay: the delay time between two checkpoints. (Since 2.6)
+#
 # Since: 2.4
 ##
 { 'command': 'migrate-set-parameters',
@@ -656,7 +664,8 @@
             '*compress-threads': 'int',
             '*decompress-threads': 'int',
             '*x-cpu-throttle-initial': 'int',
-            '*x-cpu-throttle-increment': 'int'} }
+            '*x-cpu-throttle-increment': 'int',
+            '*checkpoint-delay': 'int' } }
 
 #
 # @MigrationParameters
@@ -675,6 +684,8 @@
 #                            auto-converge detects that migration is not making
 #                            progress. The default value is 10. (Since 2.5)
 #
+# @checkpoint-delay: the delay time between two COLO checkpoints
+#
 # Since: 2.4
 ##
 { 'struct': 'MigrationParameters',
@@ -682,7 +693,9 @@
             'compress-threads': 'int',
             'decompress-threads': 'int',
             'x-cpu-throttle-initial': 'int',
-            'x-cpu-throttle-increment': 'int'} }
+            'x-cpu-throttle-increment': 'int',
+            'checkpoint-delay': 'int'} }
+
 ##
 # @query-migrate-parameters
 #
