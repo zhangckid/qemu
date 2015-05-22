@@ -790,7 +790,8 @@ static void mirror_start_job(BlockDriverState *bs, BlockDriverState *target,
                              BlockCompletionFunc *cb,
                              void *opaque, Error **errp,
                              const BlockJobDriver *driver,
-                             bool is_none_mode, BlockDriverState *base)
+                             bool is_none_mode, BlockDriverState *base,
+                             bool auto_complete)
 {
     MirrorBlockJob *s;
     BlockDriverState *replaced_bs;
@@ -846,6 +847,9 @@ static void mirror_start_job(BlockDriverState *bs, BlockDriverState *target,
     s->granularity = granularity;
     s->buf_size = ROUND_UP(buf_size, granularity);
     s->unmap = unmap;
+    if (auto_complete) {
+        s->should_complete = true;
+    }
 
     s->dirty_bitmap = bdrv_create_dirty_bitmap(bs, granularity, NULL, errp);
     if (!s->dirty_bitmap) {
@@ -886,14 +890,15 @@ void mirror_start(BlockDriverState *bs, BlockDriverState *target,
     mirror_start_job(bs, target, replaces,
                      speed, granularity, buf_size,
                      on_source_error, on_target_error, unmap, cb, opaque, errp,
-                     &mirror_job_driver, is_none_mode, base);
+                     &mirror_job_driver, is_none_mode, base, false);
 }
 
 void commit_active_start(BlockDriverState *bs, BlockDriverState *base,
                          int64_t speed,
                          BlockdevOnError on_error,
                          BlockCompletionFunc *cb,
-                         void *opaque, Error **errp)
+                         void *opaque, Error **errp,
+                         bool auto_complete)
 {
     int64_t length, base_length;
     int orig_base_flags;
@@ -934,7 +939,7 @@ void commit_active_start(BlockDriverState *bs, BlockDriverState *base,
     bdrv_ref(base);
     mirror_start_job(bs, base, NULL, speed, 0, 0,
                      on_error, on_error, false, cb, opaque, &local_err,
-                     &commit_active_job_driver, false, base);
+                     &commit_active_job_driver, false, base, auto_complete);
     if (local_err) {
         error_propagate(errp, local_err);
         goto error_restore_flags;

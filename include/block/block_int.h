@@ -649,13 +649,14 @@ void commit_start(BlockDriverState *bs, BlockDriverState *base,
  * @cb: Completion function for the job.
  * @opaque: Opaque pointer value passed to @cb.
  * @errp: Error object.
+ * @auto_complete: Auto complete the job.
  *
  */
 void commit_active_start(BlockDriverState *bs, BlockDriverState *base,
                          int64_t speed,
                          BlockdevOnError on_error,
                          BlockCompletionFunc *cb,
-                         void *opaque, Error **errp);
+                         void *opaque, Error **errp, bool auto_complete);
 /*
  * mirror_start:
  * @bs: Block device to operate on.

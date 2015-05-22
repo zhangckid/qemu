@@ -3150,7 +3150,7 @@ void qmp_block_commit(const char *device,
             goto out;
         }
         commit_active_start(bs, base_bs, speed, on_error, block_job_cb,
-                            bs, &local_err);
+                            bs, &local_err, false);
     } else {
         commit_start(bs, base_bs, top_bs, speed, on_error, block_job_cb, bs,
                      has_backing_file ? backing_file : NULL, &local_err);
