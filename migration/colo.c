@@ -18,6 +18,7 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "migration/failover.h"
+#include "qapi-event.h"
 
 /* colo buffer */
 #define COLO_BUFFER_BASE_SIZE (4 * 1024 * 1024)
@@ -368,6 +369,18 @@ out:
     if (local_err) {
         error_report_err(local_err);
     }
+    /*
+    * There are only two reasons we can go here, something error happened,
+    * Or users triggered failover.
+    */
+    if (!failover_request_is_active()) {
+        qapi_event_send_colo_exit(COLO_MODE_PRIMARY,
+                                  COLO_EXIT_REASON_ERROR, NULL);
+    } else {
+        qapi_event_send_colo_exit(COLO_MODE_PRIMARY,
+                                  COLO_EXIT_REASON_REQUEST, NULL);
+    }
+
     qsb_free(buffer);
     buffer = NULL;
 
@@ -530,6 +543,13 @@ out:
     /* Throw the unreported error message after exited from loop */
     if (local_err) {
         error_report_err(local_err);
+    }
+    if (!failover_request_is_active()) {
+        qapi_event_send_colo_exit(COLO_MODE_SECONDARY,
+                                  COLO_EXIT_REASON_ERROR, NULL);
+    } else {
+        qapi_event_send_colo_exit(COLO_MODE_SECONDARY,
+                                  COLO_EXIT_REASON_REQUEST, NULL);
     }
 
     if (fb) {
