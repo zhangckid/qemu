@@ -289,21 +289,37 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         goto out;
     }
 
-    /* Disable block migration */
-    s->params.blk = 0;
-    s->params.shared = 0;
-    qemu_savevm_state_header(trans);
-    qemu_savevm_state_begin(trans, &s->params);
-    qemu_mutex_lock_iothread();
-    qemu_savevm_state_complete_precopy(trans, false);
-    qemu_mutex_unlock_iothread();
-
-    qemu_fflush(trans);
-
     colo_send_message(s->to_dst_file, COLO_MESSAGE_VMSTATE_SEND, &local_err);
     if (local_err) {
         goto out;
     }
+
+    /* Disable block migration */
+    s->params.blk = 0;
+    s->params.shared = 0;
+    qemu_savevm_state_begin(s->to_dst_file, &s->params);
+    ret = qemu_file_get_error(s->to_dst_file);
+    if (ret < 0) {
+        error_report("Save vm state begin error");
+        goto out;
+    }
+
+    qemu_mutex_lock_iothread();
+    /*
+    * Only save VM's live state, which not including device state.
+    * TODO: We may need a timeout mechanism to prevent COLO process
+    * to be blocked here.
+    */
+    qemu_savevm_live_state(s->to_dst_file);
+    /* Note: device state is saved into buffer */
+    ret = qemu_save_device_state(trans);
+    qemu_mutex_unlock_iothread();
+    if (ret < 0) {
+        error_report("Save device state error");
+        goto out;
+    }
+    qemu_fflush(trans);
+
     /* we send the total size of the vmstate first */
     size = qsb_get_length(buffer);
     colo_send_message_value(s->to_dst_file, COLO_MESSAGE_VMSTATE_SIZE,
@@ -575,6 +591,16 @@ void *colo_process_incoming_thread(void *opaque)
             goto out;
         }
 
+        ret = qemu_loadvm_state_begin(mis->from_src_file);
+        if (ret < 0) {
+            error_report("Load vm state begin error, ret=%d", ret);
+            goto out;
+        }
+        ret = qemu_loadvm_state_main(mis->from_src_file, mis);
+        if (ret < 0) {
+            error_report("Load VM's live state (ram) error");
+            goto out;
+        }
         /* read the VM state total size first */
         value = colo_receive_message_value(mis->from_src_file,
                                  COLO_MESSAGE_VMSTATE_SIZE, &local_err);
@@ -607,8 +633,10 @@ void *colo_process_incoming_thread(void *opaque)
         qemu_mutex_lock_iothread();
         qemu_system_reset(VMRESET_SILENT);
         vmstate_loading = true;
-        if (qemu_loadvm_state(fb) < 0) {
-            error_report("COLO: loadvm failed");
+        colo_flush_ram_cache();
+        ret = qemu_load_device_state(fb);
+        if (ret < 0) {
+            error_report("COLO: load device state failed");
             qemu_mutex_unlock_iothread();
             goto out;
         }
