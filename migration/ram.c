@@ -2268,6 +2268,9 @@ static inline void *host_from_ram_block_offset(RAMBlock *block,
 static inline void *colo_cache_from_block_offset(RAMBlock *block,
                                                  ram_addr_t offset)
 {
+    unsigned long *bitmap;
+    long k;
+
     if (!offset_in_ramblock(block, offset)) {
         return NULL;
     }
@@ -2275,6 +2278,17 @@ static inline void *colo_cache_from_block_offset(RAMBlock *block,
         error_report("%s: colo_cache is NULL in block :%s",
                      __func__, block->idstr);
         return NULL;
+    }
+
+    k = (memory_region_get_ram_addr(block->mr) + offset) >> TARGET_PAGE_BITS;
+    bitmap = atomic_rcu_read(&ram_state.ram_bitmap)->bmap;
+    /*
+    * During colo checkpoint, we need bitmap of these migrated pages.
+    * It help us to decide which pages in ram cache should be flushed
+    * into VM's RAM later.
+    */
+    if (!test_and_set_bit(k, bitmap)) {
+        ram_state.migration_dirty_pages++;
     }
     return block->colo_cache + offset;
 }
@@ -2752,6 +2766,15 @@ int colo_init_ram_cache(void)
         memcpy(block->colo_cache, block->host, block->used_length);
     }
     rcu_read_unlock();
+    /*
+    * Record the dirty pages that sent by PVM, we use this dirty bitmap together
+    * with to decide which page in cache should be flushed into SVM's RAM. Here
+    * we use the same name 'ram_bitmap' as for migration.
+    */
+    ram_state.ram_bitmap = g_new0(RAMBitmap, 1);
+    ram_state.ram_bitmap->bmap = bitmap_new(last_ram_page());
+    ram_state.migration_dirty_pages = 0;
+
     return 0;
 
 out_locked:
@@ -2770,6 +2793,12 @@ out_locked:
 void colo_release_ram_cache(void)
 {
     RAMBlock *block;
+    RAMBitmap *bitmap = ram_state.ram_bitmap;
+
+    atomic_rcu_set(&ram_state.ram_bitmap, NULL);
+    if (bitmap) {
+        call_rcu(bitmap, migration_bitmap_free, rcu);
+    }
 
     rcu_read_lock();
     QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
