@@ -24,6 +24,8 @@
 #include "qapi/qmp/qstring.h"
 #include "qapi-event.h"
 #include "crypto/hash.h"
+#include "qemu/bitmap.h"
+#include "qemu/cutils.h"
 
 #define HASH_LENGTH 32
 
@@ -81,6 +83,8 @@ typedef struct BDRVQuorumState {
     bool rewrite_corrupted;/* true if the driver must rewrite-on-read corrupted
                             * block if Quorum is reached.
                             */
+    unsigned long *index_bitmap;
+    int bsize;
 
     QuorumReadPattern read_pattern;
 } BDRVQuorumState;
@@ -898,9 +902,9 @@ static int quorum_open(BlockDriverState *bs, QDict *options, int flags,
         ret = -EINVAL;
         goto exit;
     }
-    if (s->num_children < 2) {
+    if (s->num_children < 1) {
         error_setg(&local_err,
-                   "Number of provided children must be greater than 1");
+                   "Number of provided children must be 1 or more");
         ret = -EINVAL;
         goto exit;
     }
@@ -949,6 +953,7 @@ static int quorum_open(BlockDriverState *bs, QDict *options, int flags,
     /* allocate the children array */
     s->children = g_new0(BdrvChild *, s->num_children);
     opened = g_new0(bool, s->num_children);
+    s->index_bitmap = bitmap_new(s->num_children);
 
     for (i = 0; i < s->num_children; i++) {
         char indexstr[32];
@@ -964,6 +969,8 @@ static int quorum_open(BlockDriverState *bs, QDict *options, int flags,
 
         opened[i] = true;
     }
+    bitmap_set(s->index_bitmap, 0, s->num_children);
+    s->bsize = s->num_children;
 
     g_free(opened);
     goto exit;
@@ -1020,6 +1027,114 @@ static void quorum_attach_aio_context(BlockDriverState *bs,
     }
 }
 
+static int get_new_child_index(BDRVQuorumState *s)
+{
+    int index;
+
+    index = find_next_zero_bit(s->index_bitmap, s->bsize, 0);
+    if (index < s->bsize) {
+        return index;
+    }
+
+    s->index_bitmap = bitmap_zero_extend(s->index_bitmap, s->bsize,
+                                         s->bsize + 1);
+    return s->bsize++;
+}
+
+static void remove_child_index(BDRVQuorumState *s, int index)
+{
+    int last_index, old_bsize;
+    size_t new_len;
+
+    assert(index < s->bsize);
+
+    clear_bit(index, s->index_bitmap);
+    if (index < s->bsize - 1) {
+        /* The last bit is always set */
+        return;
+    }
+
+    /* Clear last bit */
+    old_bsize = s->bsize;
+    last_index = find_last_bit(s->index_bitmap, s->bsize);
+    assert(last_index < old_bsize);
+    s->bsize = last_index + 1;
+
+    if (BITS_TO_LONGS(old_bsize) == BITS_TO_LONGS(s->bsize)) {
+        return;
+    }
+
+    new_len = BITS_TO_LONGS(s->bsize) * sizeof(unsigned long);
+    s->index_bitmap = g_realloc(s->index_bitmap, new_len);
+}
+
+static void quorum_add_child(BlockDriverState *bs, BlockDriverState *child_bs,
+                             Error **errp)
+{
+    BDRVQuorumState *s = bs->opaque;
+    BdrvChild *child;
+    char indexstr[32];
+    int index, ret;
+
+    index = get_new_child_index(s);
+    ret = snprintf(indexstr, 32, "children.%d", index);
+    if (ret < 0 || ret >= 32) {
+        error_setg(errp, "cannot generate child name");
+        return;
+    }
+
+    bdrv_drain(bs);
+
+    assert(s->num_children <= INT_MAX / sizeof(BdrvChild *));
+    if (s->num_children == INT_MAX / sizeof(BdrvChild *)) {
+        error_setg(errp, "Too many children");
+        return;
+    }
+    s->children = g_renew(BdrvChild *, s->children, s->num_children + 1);
+
+    bdrv_ref(child_bs);
+    child = bdrv_attach_child(bs, child_bs, indexstr, &child_format);
+    s->children[s->num_children++] = child;
+    set_bit(index, s->index_bitmap);
+}
+
+static void quorum_del_child(BlockDriverState *bs, BdrvChild *child,
+                             Error **errp)
+{
+    BDRVQuorumState *s = bs->opaque;
+    int i, rc;
+    unsigned long index;
+
+    for (i = 0; i < s->num_children; i++) {
+        if (s->children[i] == child) {
+            break;
+        }
+    }
+
+    /* we have checked it in bdrv_del_child() */
+    assert(i < s->num_children);
+
+    if (s->num_children <= s->threshold) {
+        error_setg(errp,
+            "The number of children cannot be lower than the vote threshold %d",
+            s->threshold);
+        return;
+    }
+
+    /* child->name is "children.%d" */
+    assert(!strncmp(child->name, "children.", 9));
+    rc = qemu_strtoul(child->name + 9, NULL, 10, &index);
+    assert(!rc && index < INT_MAX / sizeof(BdrvChild *));
+
+    bdrv_drain(bs);
+    /* We can safely remove this child now */
+    memmove(&s->children[i], &s->children[i + 1],
+            (s->num_children - i - 1) * sizeof(void *));
+    s->children = g_renew(BdrvChild *, s->children, --s->num_children);
+    remove_child_index(s, index);
+    bdrv_unref_child(bs, child);
+}
+
 static void quorum_refresh_filename(BlockDriverState *bs, QDict *options)
 {
     BDRVQuorumState *s = bs->opaque;
@@ -1074,6 +1189,9 @@ static BlockDriver bdrv_quorum = {
 
     .bdrv_detach_aio_context            = quorum_detach_aio_context,
     .bdrv_attach_aio_context            = quorum_attach_aio_context,
+
+    .bdrv_add_child                     = quorum_add_child,
+    .bdrv_del_child                     = quorum_del_child,
 
     .is_filter                          = true,
     .bdrv_recurse_is_first_non_filter   = quorum_recurse_is_first_non_filter,
