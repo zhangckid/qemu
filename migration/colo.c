@@ -694,9 +694,9 @@ void *colo_process_incoming_thread(void *opaque)
         }
         /* discard colo disk buffer */
         bdrv_do_checkpoint_all(&local_err);
-        qemu_mutex_unlock_iothread();
         if (local_err) {
             vmstate_loading = false;
+            qemu_mutex_unlock_iothread();
             goto out;
         }
 
