@@ -22,6 +22,8 @@
 #define DEBUG(format, ...)
 #endif
 
+static char *mode;
+static bool colo_do_checkpoint;
 
 static ssize_t colo_proxy_receive_iov(NetFilterState *nf,
                                          NetClientState *sender,
@@ -46,13 +48,84 @@ static ssize_t colo_proxy_receive_iov(NetFilterState *nf,
 
 static void colo_proxy_cleanup(NetFilterState *nf)
 {
-     /* cleanup */
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    close(s->sockfd);
+    s->sockfd = -1;
+    g_free(mode);
+    g_free(s->addr);
 }
 
+static void colo_accept_incoming(ColoProxyState *s)
+{
+    DEBUG("into colo_accept_incoming\n");
+    struct sockaddr_in addr;
+    socklen_t addrlen = sizeof(addr);
+    int acceptsock, err;
+
+    do {
+        acceptsock = qemu_accept(s->sockfd, (struct sockaddr *)&addr, &addrlen);
+        err = socket_error();
+    } while (acceptsock < 0 && err == EINTR);
+    qemu_set_fd_handler(s->sockfd, NULL, NULL, NULL);
+    closesocket(s->sockfd);
+
+    DEBUG("accept colo proxy\n");
+
+    if (acceptsock < 0) {
+        printf("could not accept colo connection (%s)\n",
+                     strerror(err));
+        return;
+    }
+    s->sockfd = acceptsock;
+    /* TODO: handle the packets that primary forward */
+    return;
+}
+
+/* Return 1 on success, or return -1 if failed */
+static ssize_t colo_start_incoming(ColoProxyState *s)
+{
+    int serversock;
+    serversock = inet_listen(s->addr, NULL, 256, SOCK_STREAM, 0, NULL);
+    if (serversock < 0) {
+        g_free(s->addr);
+        return -1;
+    }
+    s->sockfd = serversock;
+    qemu_set_fd_handler(serversock, (IOHandler *)colo_accept_incoming, NULL,
+                        (void *)s);
+    g_free(s->addr);
+    return 1;
+}
+
+/* Return 1 on success, or return -1 if setup failed */
+static ssize_t colo_proxy_primary_setup(NetFilterState *nf)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    int sock;
+    sock = inet_connect(s->addr, NULL);
+    if (sock < 0) {
+        printf("colo proxy connect failed\n");
+        g_free(s->addr);
+        return -1;
+    }
+    DEBUG("colo proxy connect success\n");
+    s->sockfd = sock;
+   /* TODO: handle the packets that secondary forward */
+    g_free(s->addr);
+    return 1;
+}
+
+/* Return 1 on success, or return -1 if setup failed */
+static ssize_t colo_proxy_secondary_setup(NetFilterState *nf)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    return colo_start_incoming(s);
+}
 
 static void colo_proxy_setup(NetFilterState *nf, Error **errp)
 {
     ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    ssize_t ret = 0;
     if (!s->addr) {
         error_setg(errp, "filter colo_proxy needs 'addr' \
                      property set!");
@@ -68,16 +141,28 @@ static void colo_proxy_setup(NetFilterState *nf, Error **errp)
     s->sockfd = -1;
     s->has_failover = false;
     colo_do_checkpoint = false;
+    s->incoming_queue = qemu_new_net_queue(qemu_netfilter_pass_to_next, nf);
+    s->unprocessed_packets = g_hash_table_new_full(connection_key_hash,
+                                                       connection_key_equal,
+                                                       g_free,
+                                                       connection_destroy);
     g_queue_init(&s->unprocessed_connections);
 
     if (!strcmp(mode, PRIMARY_MODE)) {
         s->colo_mode = COLO_PRIMARY_MODE;
+        ret = colo_proxy_primary_setup(nf);
     } else if (!strcmp(mode, SECONDARY_MODE)) {
         s->colo_mode = COLO_SECONDARY_MODE;
+        ret = colo_proxy_secondary_setup(nf);
     } else {
         error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "mode",
                     "primary or secondary");
         return;
+    }
+    if (ret) {
+        DEBUG("colo_proxy_setup success\n");
+    } else {
+        DEBUG("colo_proxy_setup failed\n");
     }
 }
 
