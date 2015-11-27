@@ -14,12 +14,6 @@
 #include "qapi/qmp/qerror.h"
 #include "qapi-visit.h"
 #include "qom/object.h"
-#include "net/net.h"
-#include "qapi/qmp/qdict.h"
-#include "qapi/qmp-output-visitor.h"
-#include "qapi/qmp-input-visitor.h"
-#include "monitor/monitor.h"
-#include "qmp-commands.h"
 
 #define TYPE_FILTER_BUFFER "filter-buffer"
 
@@ -32,8 +26,6 @@ typedef struct FilterBufferState {
     NetQueue *incoming_queue;
     uint32_t interval;
     QEMUTimer release_timer;
-    bool is_default;
-    bool enable_buffer;
 } FilterBufferState;
 
 static void filter_buffer_flush(NetFilterState *nf)
@@ -73,10 +65,6 @@ static ssize_t filter_buffer_receive_iov(NetFilterState *nf,
 {
     FilterBufferState *s = FILTER_BUFFER(nf);
 
-    /* Don't buffer any packets if the filter is not enabled */
-    if (!s->enable_buffer) {
-        return 0;
-    }
     /*
      * We return size when buffer a packet, the sender will take it as
      * a already sent packet, so sent_cb should not be called later.
@@ -114,10 +102,18 @@ static void filter_buffer_cleanup(NetFilterState *nf)
 static void filter_buffer_setup(NetFilterState *nf, Error **errp)
 {
     FilterBufferState *s = FILTER_BUFFER(nf);
-    char *path = object_get_canonical_path_component(OBJECT(nf));
+
+    /*
+     * We may want to accept zero interval when VM FT solutions like MC
+     * or COLO use this filter to release packets on demand.
+     */
+    if (!s->interval) {
+        error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "interval",
+                   "a non-zero interval");
+        return;
+    }
 
     s->incoming_queue = qemu_new_net_queue(qemu_netfilter_pass_to_next, nf);
-    s->is_default = !strcmp(path, "nop");
     if (s->interval) {
         timer_init_us(&s->release_timer, QEMU_CLOCK_VIRTUAL,
                       filter_buffer_release_timer, nf);
@@ -165,105 +161,6 @@ static void filter_buffer_set_interval(Object *obj, Visitor *v, void *opaque,
 
 out:
     error_propagate(errp, local_err);
-}
-
-static void default_filter_release_packets(NetFilterState *nf,
-                                           void *opaque,
-                                           Error **errp)
-{
-    if (!strcmp(object_get_typename(OBJECT(nf)), TYPE_FILTER_BUFFER)) {
-        FilterBufferState *s = FILTER_BUFFER(nf);
-
-        if (s->is_default) {
-            filter_buffer_flush(nf);
-        }
-    }
-}
-
-/* public APIs */
-void qemu_release_default_filters_packets(void)
-{
-    qemu_foreach_netfilter(default_filter_release_packets, NULL, NULL);
-}
-
-static void default_filter_set_buffer_flag(NetFilterState *nf,
-                                           void *opaque,
-                                           Error **errp)
-{
-    if (!strcmp(object_get_typename(OBJECT(nf)), TYPE_FILTER_BUFFER)) {
-        FilterBufferState *s = FILTER_BUFFER(nf);
-        bool *flag = opaque;
-
-        if (s->is_default) {
-            s->enable_buffer = *flag;
-        }
-    }
-}
-
-void qemu_set_default_filter_buffers(bool enable_buffer)
-{
-    qemu_foreach_netfilter(default_filter_set_buffer_flag,
-                           &enable_buffer, NULL);
-}
-
-/*
-* This will be used by COLO or MC FT, for which they will need
-* to buffer the packets of VM's net devices, Here we add a default
-* buffer filter for each netdev. The name of default buffer filter is
-* 'nop'
-*/
-void netdev_add_default_filter_buffer(const char *netdev_id,
-                                      NetFilterDirection direction,
-                                      Error **errp)
-{
-    QmpOutputVisitor *qov;
-    QmpInputVisitor *qiv;
-    Visitor *ov, *iv;
-    QObject *obj = NULL;
-    QDict *qdict;
-    void *dummy = NULL;
-    const char *id = "nop";
-    char *queue = g_strdup(NetFilterDirection_lookup[direction]);
-    NetClientState *nc = qemu_find_netdev(netdev_id);
-    Error *err = NULL;
-
-    /* FIXME: Not support multiple queues */
-    if (!nc || nc->queue_index > 1) {
-        return;
-    }
-    qov = qmp_output_visitor_new();
-    ov = qmp_output_get_visitor(qov);
-    visit_start_struct(ov,  &dummy, NULL, NULL, 0, &err);
-    if (err) {
-        goto out;
-    }
-    visit_type_str(ov, &nc->name, "netdev", &err);
-    if (err) {
-        goto out;
-    }
-    visit_type_str(ov, &queue, "queue", &err);
-    if (err) {
-        goto out;
-    }
-    visit_end_struct(ov, &err);
-    if (err) {
-        goto out;
-    }
-    obj = qmp_output_get_qobject(qov);
-    g_assert(obj != NULL);
-    qdict = qobject_to_qdict(obj);
-    qmp_output_visitor_cleanup(qov);
-
-    qiv = qmp_input_visitor_new(obj);
-    iv = qmp_input_get_visitor(qiv);
-    object_add(TYPE_FILTER_BUFFER, id, qdict, iv, &err);
-    qmp_input_visitor_cleanup(qiv);
-    qobject_decref(obj);
-out:
-    g_free(queue);
-    if (err) {
-        error_propagate(errp, err);
-    }
 }
 
 static void filter_buffer_init(Object *obj)

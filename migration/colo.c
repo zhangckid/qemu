@@ -19,7 +19,6 @@
 #include "qemu/sockets.h"
 #include "migration/failover.h"
 #include "qapi-event.h"
-#include "net/filter.h"
 #include "block/block_int.h"
 
 /*
@@ -141,8 +140,6 @@ static void primary_vm_do_failover(void)
                      "old_state: %d", old_state);
         return;
     }
-    /* Don't buffer any packets while exited COLO */
-    qemu_set_default_filter_buffers(false);
 
     bdrv_stop_replication_all(true, &local_err);
     if (local_err) {
@@ -314,8 +311,6 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         goto out;
     }
 
-    qemu_release_default_filters_packets();
-
     if (colo_shutdown) {
         qemu_mutex_lock_iothread();
         bdrv_stop_replication_all(false, NULL);
@@ -398,8 +393,6 @@ static void colo_process_checkpoint(MigrationState *s)
         error_report("Failed to allocate colo buffer!");
         goto out;
     }
-    /* Begin to buffer packets that sent by VM */
-    qemu_set_default_filter_buffers(true);
 
     qemu_mutex_lock_iothread();
     /* start block replication */
