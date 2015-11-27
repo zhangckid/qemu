@@ -70,6 +70,41 @@ static Connection *connection_new(void)
     return connection;
 }
 
+static void colo_send_primary_packet(void *opaque, void *user_data)
+{
+    Packet *pkt = opaque;
+    qemu_net_queue_send(pkt->s->incoming_queue, pkt->sender, 0,
+                    (const uint8_t *)pkt->data, pkt->size, NULL);
+}
+
+static void colo_flush_connection(void *opaque, void *user_data)
+{
+    Connection *connection = opaque;
+    g_queue_foreach(&connection->primary_list, colo_send_primary_packet, NULL);
+    g_queue_foreach(&connection->secondary_list, packet_destroy, NULL);
+}
+
+static void colo_proxy_notify_checkpoint(void)
+{
+    DEBUG("colo_proxy_notify_checkpoint\n");
+}
+
+static void colo_proxy_do_checkpoint(NetFilterState *nf)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+
+    g_queue_foreach(&s->unprocessed_connections, colo_flush_connection, NULL);
+}
+
+/*
+ * colo failover flag
+ */
+static ssize_t colo_has_failover(NetFilterState *nf)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    return s->has_failover;
+}
+
 /* Return 0 on success, or return -1 if the pkt is corrpted */
 static int parse_packet_early(Packet *pkt, Connection_key *key)
 {
@@ -134,6 +169,45 @@ static void packet_destroy(void *opaque, void *user_data)
     Packet *pkt = opaque;
     g_free(pkt->data);
     g_slice_free(Packet, pkt);
+}
+
+/*
+ * The sent IP packets comparison between primary
+ * and secondary
+ * TODO： support ip fragment
+ * return:    true  means packet same
+ *            false means packet different
+ */
+static bool colo_packet_compare(Packet *ppkt, Packet *spkt)
+{
+    int i;
+    DEBUG("colo_packet_compare lens ppkt %d,spkt %d\n", ppkt->size,
+                spkt->size);
+    DEBUG("primary pkt data=%s,  pkt->ip->ipsrc=%x,pkt->ip->ipdst=%x\n",
+                (char *)ppkt->data, ppkt->ip->ip_src, ppkt->ip->ip_dst);
+    DEBUG("seconda pkt data=%s,  pkt->ip->ipsrc=%x,pkt->ip->ipdst=%x\n",
+                (char *)spkt->data, spkt->ip->ip_src, spkt->ip->ip_dst);
+    if (ppkt->size == spkt->size) {
+        DEBUG("colo_packet_compare data   ppkt\n");
+        for (i = 0; i < spkt->size; i++) {
+            DEBUG("%x", ((char *)ppkt->data)[i]);
+            DEBUG("|");
+        }
+        DEBUG("\ncolo_packet_compare data   spkt\n");
+        for (i = 0; i < spkt->size; i++) {
+            DEBUG("%x", ((char *)spkt->data)[i]);
+            DEBUG("|");
+        }
+        DEBUG("\ncolo_packet_compare data   ppkt %s\n", (char *)ppkt->data);
+        DEBUG("colo_packet_compare data   spkt %s\n", (char *)spkt->data);
+        if (!memcmp(ppkt->data, spkt->data, spkt->size)) {
+            return true;
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
 }
 
 static Connection *colo_proxy_enqueue_packet(GHashTable *unprocessed_packets,
