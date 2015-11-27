@@ -24,6 +24,170 @@
 
 static char *mode;
 static bool colo_do_checkpoint;
+static void packet_destroy(void *opaque, void *user_data);
+
+static uint32_t connection_key_hash(const void *opaque)
+{
+    const Connection_key *key = opaque;
+    uint32_t a, b, c;
+
+    /* Jenkins hash */
+    a = b = c = JHASH_INITVAL + sizeof(*key);
+    a += key->src;
+    b += key->dst;
+    c += key->ports;
+    __jhash_mix(a, b, c);
+
+    a += key->ip_proto;
+    __jhash_final(a, b, c);
+
+    return c;
+}
+
+static int connection_key_equal(const void *opaque1, const void *opaque2)
+{
+    return memcmp(opaque1, opaque2, sizeof(Connection_key)) == 0;
+}
+
+static void connection_destroy(void *opaque)
+{
+    Connection *connection = opaque;
+    g_queue_foreach(&connection->primary_list, packet_destroy, NULL);
+    g_queue_free(&connection->primary_list);
+    g_queue_foreach(&connection->secondary_list, packet_destroy, NULL);
+    g_queue_free(&connection->secondary_list);
+    g_slice_free(Connection, connection);
+}
+
+static Connection *connection_new(void)
+{
+    Connection *connection = g_slice_new(Connection);
+
+    g_queue_init(&connection->primary_list);
+    g_queue_init(&connection->secondary_list);
+    connection->processing = false;
+
+    return connection;
+}
+
+/* Return 0 on success, or return -1 if the pkt is corrpted */
+static int parse_packet_early(Packet *pkt, Connection_key *key)
+{
+    int network_length;
+    uint8_t *data = pkt->data;
+
+    pkt->network_layer = data + ETH_HLEN;
+    if (ntohs(*(uint16_t *)(data + 12)) != ETH_P_IP) {
+        if (ntohs(*(uint16_t *)(data + 12)) == ETH_P_ARP) {
+            return -1;
+        }
+        return 0;
+    }
+
+    network_length = pkt->ip->ip_hl * 4;
+    pkt->transport_layer = pkt->network_layer + network_length;
+    key->ip_proto = pkt->ip->ip_p;
+    key->src = pkt->ip->ip_src;
+    key->dst = pkt->ip->ip_dst;
+
+    switch (key->ip_proto) {
+    case IPPROTO_TCP:
+    case IPPROTO_UDP:
+    case IPPROTO_DCCP:
+    case IPPROTO_ESP:
+    case IPPROTO_SCTP:
+    case IPPROTO_UDPLITE:
+        key->ports = *(uint32_t *)(pkt->transport_layer);
+        break;
+    case IPPROTO_AH:
+        key->ports = *(uint32_t *)(pkt->transport_layer + 4);
+        break;
+    default:
+        break;
+    }
+
+    return 0;
+}
+
+static Packet *packet_new(ColoProxyState *s, const void *data,
+                          int size, Connection_key *key, NetClientState *sender)
+{
+    Packet *pkt = g_slice_new(Packet);
+
+    pkt->data = g_malloc(size);
+    memcpy(pkt->data, data, size);
+    pkt->size = size;
+    pkt->s = s;
+    pkt->sender = sender;
+    pkt->should_be_sent = false;
+
+    if (parse_packet_early(pkt, key)) {
+        packet_destroy(pkt, NULL);
+        pkt = NULL;
+    }
+
+    return pkt;
+}
+
+static void packet_destroy(void *opaque, void *user_data)
+{
+    Packet *pkt = opaque;
+    g_free(pkt->data);
+    g_slice_free(Packet, pkt);
+}
+
+static Connection *colo_proxy_enqueue_packet(GHashTable *unprocessed_packets,
+                                          Connection_key *key,
+                                          Packet *pkt, packet_type type)
+{
+    Connection *connection;
+    Packet *tmppkt;
+    connection = g_hash_table_lookup(unprocessed_packets, key);
+    if (connection == NULL) {
+        Connection_key *new_key = g_malloc(sizeof(*key));
+
+        connection = connection_new();
+        memcpy(new_key, key, sizeof(*key));
+        key = new_key;
+
+        g_hash_table_insert(unprocessed_packets, key, connection);
+    }
+    switch (type) {
+    case PRIMARY_OUTPUT:
+        if (g_queue_get_length(&connection->secondary_list) > 0) {
+            tmppkt = g_queue_pop_head(&connection->secondary_list);
+            DEBUG("g_queue_get_length(&connection->primary_list)=%d\n",
+                        g_queue_get_length(&connection->primary_list));
+            DEBUG("g_queue_get_length(&connection->secondary_list)=%d\n",
+                        g_queue_get_length(&connection->secondary_list));
+            if (colo_packet_compare(pkt, tmppkt)) {
+                DEBUG("packet same and release packet\n");
+                pkt->should_be_sent = true;
+                break;
+            } else {
+                DEBUG("packet different\n");
+                colo_proxy_notify_checkpoint();
+                pkt->should_be_sent = false;
+                break;
+            }
+        } else {
+            g_queue_push_tail(&connection->primary_list, pkt);
+            pkt->should_be_sent = false;
+        }
+
+        break;
+    case SECONDARY_OUTPUT:
+        g_queue_push_tail(&connection->secondary_list, pkt);
+        DEBUG("secondary pkt data=%s,  pkt->ip->ipsrc=%x,pkt->ip->ipdst=%x\n",
+                    (char *)pkt->data, pkt->ip->ip_src, pkt->ip->ip_dst);
+        break;
+    default:
+        abort();
+    }
+
+    return connection;
+}
+
 
 /*
  * Packets to be sent by colo forward to
@@ -165,7 +329,8 @@ static ssize_t colo_proxy_primary_handler(NetFilterState *nf,
     }
 
     if (direction == NET_FILTER_DIRECTION_RX) {
-        /* TODO: enqueue_primary_packet */
+        ret = colo_enqueue_primary_packet(nf, sender, flags, iov,
+                    iovcnt, sent_cb);
     } else {
         ret = colo_forward2another(nf, sender, flags, iov, iovcnt,
                     sent_cb, COLO_PRIMARY_MODE);
