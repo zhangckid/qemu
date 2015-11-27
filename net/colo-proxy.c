@@ -26,6 +26,110 @@ static char *mode;
 static bool colo_do_checkpoint;
 
 /*
+ * Packets to be sent by colo forward to
+ * another colo
+ * return:          >= 0        success
+ *                  < 0        failed
+ */
+static ssize_t colo_forward2another(NetFilterState *nf,
+                                         NetClientState *sender,
+                                         unsigned flags,
+                                         const struct iovec *iov,
+                                         int iovcnt,
+                                         NetPacketSent *sent_cb,
+                                         mode_type mode)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    ssize_t ret = 0;
+    ssize_t size = 0;
+    struct iovec sizeiov = {
+        .iov_base = &size,
+        .iov_len = 8
+    };
+    size = iov_size(iov, iovcnt);
+    if (!size) {
+        return 0;
+    }
+
+    if (mode == COLO_PRIMARY_MODE) {
+        qemu_net_queue_send_iov(s->incoming_queue, sender, flags,
+                           iov, iovcnt, NULL);
+    }
+    ret = iov_send(s->sockfd, &sizeiov, 8, 0, 8);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = iov_send(s->sockfd, iov, iovcnt, 0, size);
+    return ret;
+}
+
+/*
+ * recv and handle colo secondary
+ * forward packets in colo primary
+ */
+static void colo_proxy_primary_forward_handler(NetFilterState *nf)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    ssize_t len = 0;
+    ssize_t ret = 0;
+    struct iovec sizeiov = {
+        .iov_base = &len,
+        .iov_len = 8
+    };
+    if (s->sockfd < 0) {
+        printf("secondary forward disconnected\n");
+        return;
+    }
+    iov_recv(s->sockfd, &sizeiov, 8, 0, 8);
+    DEBUG("primary_forward_handler recv lensbuf lens=%zu\n", len);
+
+    if (len > 0) {
+        char *recvbuf;
+        recvbuf = g_malloc0(len);
+        struct iovec iov = {
+            .iov_base = recvbuf,
+            .iov_len = len
+        };
+        iov_recv(s->sockfd, &iov, len, 0, len);
+        DEBUG("primary_forward_handler primary recvbuf=%s\n", recvbuf);
+        ret = colo_enqueue_secondary_packet(nf, recvbuf, len);
+        if (ret) {
+            DEBUG("colo_enqueue_secondary_packet succese\n");
+        } else {
+            DEBUG("colo_enqueue_secondary_packet failed\n");
+        }
+        g_free(recvbuf);
+    }
+}
+
+/*
+ * recv and handle colo primary
+ * forward packets in colo secondary
+ */
+static void colo_proxy_secondary_forward_handler(NetFilterState *nf)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    ssize_t len = 0;
+    struct iovec sizeiov = {
+        .iov_base = &len,
+        .iov_len = 8
+    };
+    iov_recv(s->sockfd, &sizeiov, 8, 0, 8);
+    if (len > 0) {
+        char *buf;
+        buf = g_malloc0(len);
+        struct iovec iov = {
+            .iov_base = buf,
+            .iov_len = len
+        };
+        iov_recv(s->sockfd, &iov, len, 0, len);
+        qemu_net_queue_send(s->incoming_queue, nf->netdev,
+                    0, (const uint8_t *)buf, len, NULL);
+        g_free(buf);
+    }
+}
+
+/*
  * colo primary handle host's normal send and
  * recv packets to primary guest
  * return:          >= 0      success
@@ -63,7 +167,8 @@ static ssize_t colo_proxy_primary_handler(NetFilterState *nf,
     if (direction == NET_FILTER_DIRECTION_RX) {
         /* TODO: enqueue_primary_packet */
     } else {
-        /* TODO: forward packets to another */
+        ret = colo_forward2another(nf, sender, flags, iov, iovcnt,
+                    sent_cb, COLO_PRIMARY_MODE);
     }
 
     return ret;
@@ -107,7 +212,8 @@ static ssize_t colo_proxy_secondary_handler(NetFilterState *nf,
                             iovcnt, NULL);
             return 1;
         } else {
-        /* TODO: forward packets to another */
+            ret = colo_forward2another(nf, sender, flags, iov, iovcnt,
+                        sent_cb, COLO_SECONDARY_MODE);
         }
 
     } else {
@@ -178,7 +284,9 @@ static void colo_accept_incoming(ColoProxyState *s)
         return;
     }
     s->sockfd = acceptsock;
-    /* TODO: handle the packets that primary forward */
+    qemu_set_fd_handler(s->sockfd,
+                (IOHandler *)colo_proxy_secondary_forward_handler, NULL,
+                (void *)s);
     return;
 }
 
@@ -211,7 +319,9 @@ static ssize_t colo_proxy_primary_setup(NetFilterState *nf)
     }
     DEBUG("colo proxy connect success\n");
     s->sockfd = sock;
-   /* TODO: handle the packets that secondary forward */
+    qemu_set_fd_handler(s->sockfd,
+                (IOHandler *)colo_proxy_primary_forward_handler,
+                NULL, (void *)s);
     g_free(s->addr);
     return 1;
 }
