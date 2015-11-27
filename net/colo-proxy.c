@@ -25,6 +25,101 @@
 static char *mode;
 static bool colo_do_checkpoint;
 
+/*
+ * colo primary handle host's normal send and
+ * recv packets to primary guest
+ * return:          >= 0      success
+ *                  < 0       failed
+ */
+static ssize_t colo_proxy_primary_handler(NetFilterState *nf,
+                                         NetClientState *sender,
+                                         unsigned flags,
+                                         const struct iovec *iov,
+                                         int iovcnt,
+                                         NetPacketSent *sent_cb)
+{
+    ssize_t ret = 0;
+    int direction;
+
+    if (sender == nf->netdev) {
+        /* This packet is sent by netdev itself */
+        direction = NET_FILTER_DIRECTION_TX;
+    } else {
+        direction = NET_FILTER_DIRECTION_RX;
+    }
+    /*
+     * if packet's direction=rx
+     * enqueue packets to primary queue
+     * and wait secondary queue to compare
+     * if packet's direction=tx
+     * enqueue packets then send packets to
+     * secondary and flush  queued packets
+    */
+
+    if (colo_do_checkpoint) {
+        colo_proxy_do_checkpoint(nf);
+    }
+
+    if (direction == NET_FILTER_DIRECTION_RX) {
+        /* TODO: enqueue_primary_packet */
+    } else {
+        /* TODO: forward packets to another */
+    }
+
+    return ret;
+}
+
+/*
+ * colo secondary handle host's normal send and
+ * recv packets to secondary guest
+ * return:          >= 0      success
+ *                  < 0       failed
+ */
+static ssize_t colo_proxy_secondary_handler(NetFilterState *nf,
+                                         NetClientState *sender,
+                                         unsigned flags,
+                                         const struct iovec *iov,
+                                         int iovcnt,
+                                         NetPacketSent *sent_cb)
+{
+    ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    int direction;
+    ssize_t ret = 0;
+
+    if (sender == nf->netdev) {
+        /* This packet is sent by netdev itself */
+        direction = NET_FILTER_DIRECTION_TX;
+    } else {
+        direction = NET_FILTER_DIRECTION_RX;
+    }
+    /*
+     * if packet's direction=rx
+     * enqueue packets and send to
+     * primary QEMU
+     * if packet's direction=tx
+     * record PVM's packet inital seq & adjust
+     * client's ack,send adjusted packets to SVM(next version will be do)
+     */
+
+    if (direction == NET_FILTER_DIRECTION_RX) {
+        if (colo_has_failover(nf)) {
+            qemu_net_queue_send_iov(s->incoming_queue, sender, flags, iov,
+                            iovcnt, NULL);
+            return 1;
+        } else {
+        /* TODO: forward packets to another */
+        }
+
+    } else {
+        if (colo_has_failover(nf)) {
+            qemu_net_queue_send_iov(s->incoming_queue, sender, flags, iov,
+                            iovcnt, NULL);
+        }
+        return 1;
+    }
+    return ret;
+}
+
 static ssize_t colo_proxy_receive_iov(NetFilterState *nf,
                                          NetClientState *sender,
                                          unsigned flags,
@@ -38,10 +133,16 @@ static ssize_t colo_proxy_receive_iov(NetFilterState *nf,
      *
      */
     ColoProxyState *s = FILTER_COLO_PROXY(nf);
+    ssize_t ret = 0;
     if (s->colo_mode == COLO_PRIMARY_MODE) {
-         /* colo_proxy_primary_handler */
+        ret = colo_proxy_primary_handler(nf, sender, flags,
+                    iov, iovcnt, sent_cb);
     } else {
-         /* colo_proxy_primary_handler */
+        ret = colo_proxy_secondary_handler(nf, sender, flags,
+                    iov, iovcnt, sent_cb);
+    }
+    if (ret < 0) {
+        DEBUG("colo_proxy_receive_iov running failed\n");
     }
     return iov_size(iov, iovcnt);
 }
