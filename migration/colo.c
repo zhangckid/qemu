@@ -325,7 +325,7 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         qemu_thread_exit(0);
     }
 
-    ret = colo_proxy_do_checkpoint(COLO_MODE_SECONDARY);
+    ret = colo_proxy_do_checkpoint(COLO_MODE_PRIMARY);
     if (ret < 0) {
         goto out;
     }
@@ -378,10 +378,6 @@ static void colo_process_checkpoint(MigrationState *s)
         goto out;
     }
 
-    ret = colo_proxy_start(COLO_MODE_PRIMARY);
-    if (ret < 0) {
-        goto out;
-    }
     ret = colo_prepare_before_save(s);
     if (ret < 0) {
         goto out;
@@ -404,6 +400,10 @@ static void colo_process_checkpoint(MigrationState *s)
         goto out;
     }
 
+    ret = colo_proxy_start(COLO_MODE_PRIMARY);
+    if (ret < 0) {
+        goto out;
+    }
     qemu_mutex_lock_iothread();
     /* start block replication */
     bdrv_start_replication_all(REPLICATION_MODE_PRIMARY, &local_err);
@@ -603,11 +603,6 @@ void *colo_process_incoming_thread(void *opaque)
         goto out;
     }
 
-    ret = colo_proxy_start(COLO_MODE_SECONDARY);
-    if (ret < 0) {
-        goto out;
-    }
-
     ret = colo_prepare_before_load(mis->from_src_file);
     if (ret < 0) {
         goto out;
@@ -624,6 +619,11 @@ void *colo_process_incoming_thread(void *opaque)
     trace_colo_start_block_replication();
 
     ret = colo_ctl_put(mis->to_src_file, COLO_COMMAND_CHECKPOINT_READY, 0);
+    if (ret < 0) {
+        goto out;
+    }
+
+    ret = colo_proxy_start(COLO_MODE_SECONDARY);
     if (ret < 0) {
         goto out;
     }
