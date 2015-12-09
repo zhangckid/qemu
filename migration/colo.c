@@ -20,6 +20,7 @@
 #include "migration/failover.h"
 #include "qapi-event.h"
 #include "block/block_int.h"
+#include "net/colo-proxy.h"
 
 /*
  * The delay time before qemu begin the procedure of default failover treatment.
@@ -324,6 +325,11 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         qemu_thread_exit(0);
     }
 
+    ret = colo_proxy_do_checkpoint(COLO_MODE_SECONDARY);
+    if (ret < 0) {
+        goto out;
+    }
+
     ret = 0;
     /* Resume primary guest */
     qemu_mutex_lock_iothread();
@@ -372,6 +378,10 @@ static void colo_process_checkpoint(MigrationState *s)
         goto out;
     }
 
+    ret = colo_proxy_start(COLO_MODE_PRIMARY);
+    if (ret < 0) {
+        goto out;
+    }
     ret = colo_prepare_before_save(s);
     if (ret < 0) {
         goto out;
@@ -419,6 +429,9 @@ static void colo_process_checkpoint(MigrationState *s)
             goto out;
         }
 
+        if (colo_proxy_query_checkpoint()) {
+            goto checkpoint_begin;
+        }
         current_time = qemu_clock_get_ms(QEMU_CLOCK_HOST);
         if ((current_time - checkpoint_time <
             s->parameters[MIGRATION_PARAMETER_CHECKPOINT_DELAY]) &&
@@ -428,7 +441,10 @@ static void colo_process_checkpoint(MigrationState *s)
             delay_ms = s->parameters[MIGRATION_PARAMETER_CHECKPOINT_DELAY] -
                        (current_time - checkpoint_time);
             g_usleep(delay_ms * 1000);
+            continue;
         }
+
+checkpoint_begin:
         /* start a colo checkpoint */
         ret = colo_do_checkpoint_transaction(s, buffer);
         if (ret < 0) {
@@ -468,6 +484,7 @@ out:
     qsb_free(buffer);
     buffer = NULL;
 
+    colo_proxy_stop(COLO_MODE_PRIMARY);
     /* Hope this not to be too long to loop here */
     while (failover_get_state() != FAILOVER_STATUS_COMPLETED) {
         ;
@@ -586,6 +603,11 @@ void *colo_process_incoming_thread(void *opaque)
         goto out;
     }
 
+    ret = colo_proxy_start(COLO_MODE_SECONDARY);
+    if (ret < 0) {
+        goto out;
+    }
+
     ret = colo_prepare_before_load(mis->from_src_file);
     if (ret < 0) {
         goto out;
@@ -701,6 +723,11 @@ void *colo_process_incoming_thread(void *opaque)
             goto out;
         }
 
+        ret = colo_proxy_do_checkpoint(COLO_MODE_SECONDARY);
+        if (ret < 0) {
+            goto out;
+        }
+
         qemu_mutex_lock_iothread();
         vm_start();
         trace_colo_vm_state_change("stop", "run");
@@ -750,6 +777,7 @@ out:
     */
     colo_release_ram_cache();
 
+    colo_proxy_stop(COLO_MODE_SECONDARY);
     /* Hope this not to be too long to loop here */
     while (failover_get_state() != FAILOVER_STATUS_COMPLETED) {
         ;
