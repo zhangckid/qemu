@@ -325,17 +325,17 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         qemu_thread_exit(0);
     }
 
-    ret = colo_proxy_do_checkpoint(COLO_MODE_PRIMARY);
-    if (ret < 0) {
-        goto out;
-    }
-
     ret = 0;
     /* Resume primary guest */
     qemu_mutex_lock_iothread();
     vm_start();
     qemu_mutex_unlock_iothread();
     trace_colo_vm_state_change("stop", "run");
+
+    ret = colo_proxy_do_checkpoint(COLO_MODE_PRIMARY);
+    if (ret < 0) {
+        goto out;
+    }
 
 out:
     if (trans) {
