@@ -161,7 +161,11 @@ void free(void *ptr);
 #define ETH_ALEN 6
 #define ETH_HLEN 14
 
+#ifdef ETH_P_IP                 /* Avoid "ETH_P_IP" redefine */
+#else
 #define ETH_P_IP  0x0800        /* Internet Protocol packet  */
+#endif
+
 #define ETH_P_ARP 0x0806        /* Address Resolution packet */
 
 #define ARPOP_REQUEST 1         /* ARP request */
