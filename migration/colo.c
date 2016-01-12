@@ -440,7 +440,7 @@ static void colo_process_checkpoint(MigrationState *s)
 
             delay_ms = s->parameters[MIGRATION_PARAMETER_CHECKPOINT_DELAY] -
                        (current_time - checkpoint_time);
-            g_usleep(delay_ms * 1000);
+            g_usleep(delay_ms * 10);
             continue;
         }
 
