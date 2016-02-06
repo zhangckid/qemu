@@ -49,3 +49,7 @@ bool colo_shutdown(void)
 {
     return false;
 }
+
+void colo_add_buffer_filter(Notifier *notifier, void *data)
+{
+}

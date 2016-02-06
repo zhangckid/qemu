@@ -37,4 +37,6 @@ COLOMode get_colo_mode(void);
 void colo_do_failover(MigrationState *s);
 
 bool colo_shutdown(void);
+void colo_add_buffer_filter(Notifier *notifier, void *data);
+
 #endif
