@@ -472,6 +472,52 @@
 
 
 ##
+# @BlockNodeTreeNode:
+#
+# Describes a node in the block node graph.
+#
+# @node-name: If present, the node's name.
+#
+# @children:  List of the node's children.
+#
+# Since: 2.7
+##
+{ 'struct': 'BlockNodeTreeNode',
+  'data': { '*node-name': 'str',
+            'children': ['BlockNodeTreeChild'] } }
+
+##
+# @BlockNodeTreeChild:
+#
+# Describes a child node in the block node graph.
+#
+# @role: Role the child assumes for its parent, e.g. "file" or "backing".
+#
+# @node: The child node's BlockNodeTreeNode structure.
+#
+# Since: 2.7
+##
+{ 'struct': 'BlockNodeTreeChild',
+  'data': { 'role': 'str',
+            'node': 'BlockNodeTreeNode' } }
+
+##
+# @query-block-node-tree:
+#
+# Queries the tree of nodes under a given node in the block graph.
+#
+# @root-node: Node name or device name of the tree's root node.
+#
+# Returns: The root node's BlockNodeTreeNode structure.
+#
+# Since: 2.7
+##
+{ 'command': 'query-block-node-tree',
+  'data': { 'root-node': 'str' },
+  'returns': 'BlockNodeTreeNode' }
+
+
+##
 # @BlockDeviceTimedStats:
 #
 # Statistics of a block device during a given interval of time.

@@ -2637,6 +2637,44 @@ EQMP
     },
 
 SQMP
+query-block-node-tree
+---------------------
+
+Queries the tree of nodes under a given node in the block graph.
+
+Arguments:
+
+- "root-node": Node name or device name of the tree's root node (json-string)
+
+The block node tree is represented with BlockNodeTreeNode and BlockNodeTreeChild
+json-objects.
+
+Each BlockNodeTreeNode json-object contains the following:
+
+- "node-name": If present, the node's name (json-string, optional)
+- "children": json-array of the node's children, each entry is a json-object of
+              type BlockNodeTreeChild
+
+Each BlockNodeTreeChild json-object contains the following:
+
+- "role": Role the child node assumes for its parent, e.g. "file" or "backing"
+          (json-string)
+- "node": BlockNodeTreeNode describing the child node (json-object)
+
+The cyclic reference of BlockNodeTreeNode and BlockNodeTreeChild to each other
+thus spawns a tree.
+
+This command returns the root node's BlockNodeTreeNode structure.
+
+EQMP
+
+    {
+        .name       = "query-block-node-tree",
+        .args_type  = "root-node:B",
+        .mhandler.cmd_new = qmp_marshal_query_block_node_tree,
+    },
+
+SQMP
 query-blockstats
 ----------------
 

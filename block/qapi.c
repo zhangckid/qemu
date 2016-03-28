@@ -494,6 +494,49 @@ BlockInfoList *qmp_query_block(Error **errp)
     return head;
 }
 
+static BlockNodeTreeNode *qmp_query_block_node_tree_by_bs(BlockDriverState *bs)
+{
+    BlockNodeTreeNode *bntn;
+    BlockNodeTreeChildList **p_next;
+    BdrvChild *child;
+
+    bntn = g_new0(BlockNodeTreeNode, 1);
+
+    bntn->node_name = g_strdup(bdrv_get_node_name(bs));
+    bntn->has_node_name = bntn->node_name;
+
+    p_next = &bntn->children;
+    QLIST_FOREACH(child, &bs->children, next) {
+        BlockNodeTreeChild *bntc;
+
+        bntc = g_new(BlockNodeTreeChild, 1);
+        *bntc = (BlockNodeTreeChild){
+            .role = g_strdup(child->name),
+            .node = qmp_query_block_node_tree_by_bs(child->bs),
+        };
+
+        *p_next = g_new0(BlockNodeTreeChildList, 1);
+        (*p_next)->value = bntc;
+        p_next = &(*p_next)->next;
+    }
+
+    *p_next = NULL;
+    return bntn;
+}
+
+BlockNodeTreeNode *qmp_query_block_node_tree(const char *root_node,
+                                             Error **errp)
+{
+    BlockDriverState *bs;
+
+    bs = bdrv_lookup_bs(root_node, root_node, errp);
+    if (!bs) {
+        return NULL;
+    }
+
+    return qmp_query_block_node_tree_by_bs(bs);
+}
+
 static bool next_query_bds(BlockBackend **blk, BlockDriverState **bs,
                            bool query_nodes)
 {
