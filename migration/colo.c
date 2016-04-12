@@ -302,11 +302,6 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         goto out;
     }
 
-    colo_receive_check_message(s->rp_state.from_dst_file,
-                    COLO_MESSAGE_CHECKPOINT_REPLY, &local_err);
-    if (local_err) {
-        goto out;
-    }
     /* Reset colo buffer and open it for write */
     qsb_set_length(buffer, 0);
     trans = qemu_bufopen("w", buffer);
@@ -713,12 +708,10 @@ void *colo_process_incoming_thread(void *opaque)
             goto out;
         }
 
-        /* FIXME: This is unnecessary for periodic checkpoint mode */
-        colo_send_message(mis->to_src_file, COLO_MESSAGE_CHECKPOINT_REPLY,
-                     &local_err);
-        if (local_err) {
-            goto out;
-        }
+        qemu_mutex_lock_iothread();
+        vm_stop_force_state(RUN_STATE_COLO);
+        trace_colo_vm_state_change("run", "stop");
+        qemu_mutex_unlock_iothread();
 
         colo_receive_check_message(mis->from_src_file,
                            COLO_MESSAGE_VMSTATE_SEND, &local_err);
@@ -798,6 +791,10 @@ void *colo_process_incoming_thread(void *opaque)
             goto out;
         }
 
+        qemu_mutex_lock_iothread();
+        vm_start();
+        trace_colo_vm_state_change("stop", "run");
+        qemu_mutex_unlock_iothread();
         qemu_fclose(fb);
         fb = NULL;
     }
