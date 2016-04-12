@@ -2726,6 +2726,7 @@ int colo_init_ram_cache(void)
     migration_bitmap_rcu = g_new0(struct BitmapRcu, 1);
     migration_bitmap_rcu->bmap = bitmap_new(ram_cache_pages);
     migration_dirty_pages = 0;
+    memory_global_dirty_log_start();
 
     return 0;
 
@@ -2751,6 +2752,7 @@ void colo_release_ram_cache(void)
 
     atomic_rcu_set(&migration_bitmap_rcu, NULL);
     if (bitmap) {
+        memory_global_dirty_log_stop();
         call_rcu(bitmap, migration_bitmap_free, rcu);
     }
 
@@ -2774,6 +2776,15 @@ void colo_flush_ram_cache(void)
     void *dst_host;
     void *src_host;
     ram_addr_t offset = 0;
+
+    memory_global_dirty_log_sync();
+    qemu_mutex_lock(&migration_bitmap_mutex);
+    rcu_read_lock();
+    QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+        migration_bitmap_sync_range(block->offset, block->used_length);
+    }
+    rcu_read_unlock();
+    qemu_mutex_unlock(&migration_bitmap_mutex);
 
     trace_colo_flush_ram_cache_begin(migration_dirty_pages);
     rcu_read_lock();
