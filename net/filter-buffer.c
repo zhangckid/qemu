@@ -17,6 +17,8 @@
 #include "qapi-visit.h"
 #include "qom/object.h"
 
+#define TYPE_FILTER_BUFFER "filter-buffer"
+
 #define FILTER_BUFFER(obj) \
     OBJECT_CHECK(FilterBufferState, (obj), TYPE_FILTER_BUFFER)
 
