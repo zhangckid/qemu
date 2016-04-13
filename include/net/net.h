@@ -8,7 +8,6 @@
 #include "net/queue.h"
 #include "migration/vmstate.h"
 #include "qapi-types.h"
-#include "qemu/notify.h"
 
 #define MAX_QUEUE_NUM 1024
 
@@ -176,8 +175,6 @@ struct NICInfo {
     int instantiated; /* does this NICInfo correspond to an instantiated NIC? */
     int nvectors;
 };
-
-void netdev_init_add_notifier(Notifier *notify);
 
 extern int nb_nics;
 extern NICInfo nd_table[MAX_NICS];
