@@ -21,6 +21,18 @@
 
 #define HASHTABLE_MAX_SIZE 16384
 
+#ifndef IPPROTO_DCCP
+#define IPPROTO_DCCP 33
+#endif
+
+#ifndef IPPROTO_SCTP
+#define IPPROTO_SCTP 132
+#endif
+
+#ifndef IPPROTO_UDPLITE
+#define IPPROTO_UDPLITE 136
+#endif
+
 typedef struct Packet {
     void *data;
     union {
