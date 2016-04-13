@@ -111,17 +111,6 @@ static void secondary_vm_do_failover(void)
     }
 }
 
-static void colo_set_filter_status(const char *status, Error **errp)
-{
-    struct COLOListNode *e, *next;
-    NetFilterState *nf;
-
-    QLIST_FOREACH_SAFE(e, &COLOBufferFilters, node, next) {
-        nf = e->opaque;
-        object_property_set_str(OBJECT(nf), status, "status", errp);
-    }
-}
-
 static void primary_vm_do_failover(void)
 {
     MigrationState *s = migrate_get_current();
@@ -149,11 +138,6 @@ static void primary_vm_do_failover(void)
         error_report("Incorrect state (%d) while doing failover for Primary VM",
                      old_state);
         return;
-    }
-
-    colo_set_filter_status("off", &local_err);
-    if (local_err) {
-        error_report_err(local_err);
     }
 
     replication_stop_all(true, &local_err);
@@ -314,11 +298,6 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
     if (failover_request_is_active()) {
         goto out;
     }
-    /* Stop buffer filter and flush the buffered packets */
-    colo_set_filter_status("off", &local_err);
-    if (local_err) {
-        goto out;
-    }
 
     /* we call this api although this may do nothing on primary side */
     qemu_mutex_lock_iothread();
@@ -391,10 +370,6 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         qemu_thread_exit(0);
     }
 
-    colo_set_filter_status("on", &local_err);
-    if (local_err) {
-        goto out;
-    }
     ret = 0;
     /* Resume primary guest */
     qemu_mutex_lock_iothread();
@@ -435,11 +410,6 @@ static void colo_process_checkpoint(MigrationState *s)
     int ret;
 
     failover_init_state();
-
-    colo_set_filter_status("on", &local_err);
-    if (local_err) {
-        goto out;
-    }
 
     s->rp_state.from_dst_file = qemu_file_get_return_path(s->to_dst_file);
     if (!s->rp_state.from_dst_file) {
