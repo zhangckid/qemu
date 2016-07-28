@@ -29,10 +29,14 @@
 #include "qemu/sockets.h"
 #include "qapi-visit.h"
 #include "net/colo.h"
+#include "net/colo-compare.h"
 
 #define TYPE_COLO_COMPARE "colo-compare"
 #define COLO_COMPARE(obj) \
     OBJECT_CHECK(CompareState, (obj), TYPE_COLO_COMPARE)
+
+static QTAILQ_HEAD(, CompareState) net_compares =
+       QTAILQ_HEAD_INITIALIZER(net_compares);
 
 #define COMPARE_READ_LEN_MAX NET_BUFSIZE
 #define MAX_QUEUE_SIZE 1024
@@ -70,6 +74,7 @@ typedef struct CompareState {
     CharDriverState *chr_pri_in;
     CharDriverState *chr_sec_in;
     CharDriverState *chr_out;
+    QTAILQ_ENTRY(CompareState) next;
     SocketReadState pri_rs;
     SocketReadState sec_rs;
 
@@ -78,6 +83,7 @@ typedef struct CompareState {
      * element type: Connection
      */
     GQueue conn_list;
+    QemuMutex flush_lock; /* flush lock */
     /* hashtable to save connection */
     GHashTable *connection_track_table;
     /* compare thread, a thread for each NIC */
@@ -99,6 +105,8 @@ enum {
     PRIMARY_IN = 0,
     SECONDARY_IN,
 };
+
+static bool colo_checkpoint_result;
 
 static int compare_chr_send(CharDriverState *out,
                             const uint8_t *buf,
@@ -141,18 +149,24 @@ static int packet_enqueue(CompareState *s, int mode)
                           &s->conn_list);
 
     if (!conn->processing) {
+        qemu_mutex_lock(&s->flush_lock);
         g_queue_push_tail(&s->conn_list, conn);
+        qemu_mutex_unlock(&s->flush_lock);
         conn->processing = true;
     }
 
     if (mode == PRIMARY_IN) {
         if (g_queue_get_length(&conn->primary_list) <=
                                MAX_QUEUE_SIZE) {
+            qemu_mutex_lock(&s->flush_lock);
             g_queue_push_tail(&conn->primary_list, pkt);
+            qemu_mutex_unlock(&s->flush_lock);
             if (conn->ip_proto == IPPROTO_TCP) {
+                qemu_mutex_lock(&s->flush_lock);
                 g_queue_sort(&conn->primary_list,
                              (GCompareDataFunc)seq_sorter,
                              NULL);
+                qemu_mutex_unlock(&s->flush_lock);
             }
         } else {
             error_report("colo compare primary queue size too big,"
@@ -161,11 +175,15 @@ static int packet_enqueue(CompareState *s, int mode)
     } else {
         if (g_queue_get_length(&conn->secondary_list) <=
                                MAX_QUEUE_SIZE) {
+            qemu_mutex_lock(&s->flush_lock);
             g_queue_push_tail(&conn->secondary_list, pkt);
+            qemu_mutex_unlock(&s->flush_lock);
             if (conn->ip_proto == IPPROTO_TCP) {
+                qemu_mutex_lock(&s->flush_lock);
                 g_queue_sort(&conn->secondary_list,
                              (GCompareDataFunc)seq_sorter,
                              NULL);
+                qemu_mutex_unlock(&s->flush_lock);
             }
         } else {
             error_report("colo compare secondary queue size too big,"
@@ -174,6 +192,51 @@ static int packet_enqueue(CompareState *s, int mode)
     }
 
     return 0;
+}
+
+static void colo_flush_connection(void *opaque, void *user_data)
+{
+    CompareState *s = user_data;
+    Connection *conn = opaque;
+    Packet *pkt = NULL;
+
+    while (!g_queue_is_empty(&conn->primary_list)) {
+        pkt = g_queue_pop_head(&conn->primary_list);
+        compare_chr_send(s->chr_out, pkt->data, pkt->size);
+        packet_destroy(pkt, NULL);
+    }
+    while (!g_queue_is_empty(&conn->secondary_list)) {
+        pkt = g_queue_pop_head(&conn->secondary_list);
+        packet_destroy(pkt, NULL);
+    }
+}
+
+void colo_compare_do_checkpoint(void)
+{
+    CompareState *s;
+
+    trace_colo_compare_main("colo_compare_do_checkpoint");
+
+    QTAILQ_FOREACH(s, &net_compares, next) {
+        qemu_mutex_lock(&s->flush_lock);
+        g_queue_foreach(&s->conn_list, colo_flush_connection, s);
+        qemu_mutex_unlock(&s->flush_lock);
+    }
+}
+
+bool colo_compare_result(void)
+{
+    if (colo_checkpoint_result) {
+        colo_checkpoint_result = false;
+        return true;
+    } else {
+        return colo_checkpoint_result;
+    }
+}
+
+static void colo_notify_checkpoint(void)
+{
+    colo_checkpoint_result = true;
 }
 
 /*
@@ -352,7 +415,7 @@ static void colo_old_packet_check_one_conn(void *opaque,
 
     if (result) {
         /* do checkpoint will flush old packet */
-        /* TODO: colo_notify_checkpoint();*/
+        colo_notify_checkpoint();
     }
 }
 
@@ -383,8 +446,15 @@ static void colo_compare_connection(void *opaque, void *user_data)
     while (!g_queue_is_empty(&conn->primary_list) &&
            !g_queue_is_empty(&conn->secondary_list)) {
         qemu_mutex_lock(&s->timer_check_lock);
+        qemu_mutex_lock(&s->flush_lock);
         pkt = g_queue_pop_tail(&conn->primary_list);
         qemu_mutex_unlock(&s->timer_check_lock);
+        if (!pkt) {
+            error_report("colo-compare pop pkt failed");
+            qemu_mutex_unlock(&s->flush_lock);
+            return;
+        }
+
         switch (conn->ip_proto) {
         case IPPROTO_TCP:
             result = g_queue_find_custom(&conn->secondary_list,
@@ -403,6 +473,7 @@ static void colo_compare_connection(void *opaque, void *user_data)
                      pkt, (GCompareFunc)colo_packet_compare_other);
             break;
         }
+        qemu_mutex_unlock(&s->flush_lock);
 
         if (result) {
             ret = compare_chr_send(s->chr_out, pkt->data, pkt->size);
@@ -410,7 +481,9 @@ static void colo_compare_connection(void *opaque, void *user_data)
                 error_report("colo_send_primary_packet failed");
             }
             trace_colo_compare_main("packet same and release packet");
+            qemu_mutex_lock(&s->flush_lock);
             g_queue_remove(&conn->secondary_list, result->data);
+            qemu_mutex_unlock(&s->flush_lock);
             packet_destroy(pkt, NULL);
         } else {
             /*
@@ -420,9 +493,11 @@ static void colo_compare_connection(void *opaque, void *user_data)
              */
             trace_colo_compare_main("packet different");
             qemu_mutex_lock(&s->timer_check_lock);
+            qemu_mutex_lock(&s->flush_lock);
             g_queue_push_tail(&conn->primary_list, pkt);
             qemu_mutex_unlock(&s->timer_check_lock);
-            /* TODO: colo_notify_checkpoint();*/
+            qemu_mutex_unlock(&s->flush_lock);
+            colo_notify_checkpoint();
             break;
         }
     }
@@ -698,11 +773,15 @@ static void colo_compare_complete(UserCreatable *uc, Error **errp)
 
     qemu_chr_fe_claim_no_fail(s->chr_out);
 
+    QTAILQ_INSERT_TAIL(&net_compares, s, next);
+
     net_socket_rs_init(&s->pri_rs, compare_pri_rs_finalize);
     net_socket_rs_init(&s->sec_rs, compare_sec_rs_finalize);
 
     g_queue_init(&s->conn_list);
     qemu_mutex_init(&s->timer_check_lock);
+    qemu_mutex_init(&s->flush_lock);
+    colo_checkpoint_result = false;
 
     s->connection_track_table = g_hash_table_new_full(connection_key_hash,
                                                       connection_key_equal,
@@ -760,6 +839,10 @@ static void colo_compare_finalize(Object *obj)
         qemu_chr_fe_release(s->chr_out);
     }
 
+    if (!QTAILQ_EMPTY(&net_compares)) {
+        QTAILQ_REMOVE(&net_compares, s, next);
+    }
+
     g_queue_free(&s->conn_list);
 
     if (qemu_thread_is_self(&s->thread)) {
@@ -773,6 +856,7 @@ static void colo_compare_finalize(Object *obj)
     }
 
     qemu_mutex_destroy(&s->timer_check_lock);
+    qemu_mutex_destroy(&s->flush_lock);
 
     g_free(s->pri_indev);
     g_free(s->sec_indev);
