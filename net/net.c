@@ -1586,9 +1586,8 @@ void net_socket_rs_init(SocketReadState *rs,
 
 /*
  * Returns
- * 0: SocketReadState is not ready
- * 1: SocketReadState is ready
- * otherwise error occurs
+ * 0: success
+ * -1: error occurs
  */
 int net_fill_rstate(SocketReadState *rs, const uint8_t *buf, int size)
 {
@@ -1636,10 +1635,11 @@ int net_fill_rstate(SocketReadState *rs, const uint8_t *buf, int size)
                 if (rs->finalize) {
                     rs->finalize(rs);
                 }
-                return 1;
             }
             break;
         }
     }
+
+    assert(size == 0);
     return 0;
 }
