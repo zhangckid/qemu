@@ -30,6 +30,7 @@
 #include "qapi-visit.h"
 #include "net/colo.h"
 #include "net/colo-compare.h"
+#include "migration/migration.h"
 
 #define TYPE_COLO_COMPARE "colo-compare"
 #define COLO_COMPARE(obj) \
@@ -37,6 +38,9 @@
 
 static QTAILQ_HEAD(, CompareState) net_compares =
        QTAILQ_HEAD_INITIALIZER(net_compares);
+
+static NotifierList colo_compare_notifiers =
+    NOTIFIER_LIST_INITIALIZER(colo_compare_notifiers);
 
 #define COMPARE_READ_LEN_MAX NET_BUFSIZE
 #define MAX_QUEUE_SIZE 1024
@@ -384,6 +388,22 @@ static int colo_old_packet_check_one(Packet *pkt, int64_t *check_time)
     }
 }
 
+static void colo_compare_inconsistent_notify(void)
+{
+    notifier_list_notify(&colo_compare_notifiers,
+                migrate_get_current());
+}
+
+void colo_compare_register_notifier(Notifier *notify)
+{
+    notifier_list_add(&colo_compare_notifiers, notify);
+}
+
+void colo_compare_unregister_notifier(Notifier *notify)
+{
+    notifier_remove(notify);
+}
+
 static void colo_old_packet_check_one_conn(void *opaque,
                                            void *user_data)
 {
@@ -397,7 +417,7 @@ static void colo_old_packet_check_one_conn(void *opaque,
 
     if (result) {
         /* do checkpoint will flush old packet */
-        /* TODO: colo_notify_checkpoint();*/
+        colo_compare_inconsistent_notify();
     }
 }
 
@@ -415,7 +435,10 @@ static void colo_old_packet_check(void *opaque)
 
 /*
  * Called from the compare thread on the primary
- * for compare connection
+ * for compare connection.
+ * TODO: Reconstruct this function, we should hold the max handled sequence
+ * of the connect, Don't trigger a checkpoint request if we only get packets
+ * from one side (primary or secondary).
  */
 static void colo_compare_connection(void *opaque, void *user_data)
 {
@@ -464,11 +487,12 @@ static void colo_compare_connection(void *opaque, void *user_data)
             /*
              * If one packet arrive late, the secondary_list or
              * primary_list will be empty, so we can't compare it
-             * until next comparison.
+             * until next comparison. If the packets in the list are
+             * timeout, it will trigger a checkpoint request.
              */
             trace_colo_compare_main("packet different");
             g_queue_push_tail(&conn->primary_list, pkt);
-            /* TODO: colo_notify_checkpoint();*/
+            colo_compare_inconsistent_notify();
             break;
         }
     }
