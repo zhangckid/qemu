@@ -362,16 +362,6 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
         goto out;
     }
 
-    /* Disable block migration */
-    s->params.blk = 0;
-    s->params.shared = 0;
-    qemu_savevm_state_begin(s->to_dst_file, &s->params);
-    ret = qemu_file_get_error(s->to_dst_file);
-    if (ret < 0) {
-        error_report("Save VM state begin error");
-        goto out;
-    }
-
     /* We call this API although this may do nothing on primary side. */
     qemu_mutex_lock_iothread();
     replication_do_checkpoint_all(&local_err);
@@ -459,6 +449,21 @@ static void colo_compare_notify_checkpoint(Notifier *notifier, void *data)
     colo_checkpoint_notify(data);
 }
 
+static int colo_prepare_before_save(MigrationState *s)
+{
+    int ret;
+
+    /* Disable block migration */
+    s->params.blk = 0;
+    s->params.shared = 0;
+    qemu_savevm_state_begin(s->to_dst_file, &s->params);
+    ret = qemu_file_get_error(s->to_dst_file);
+    if (ret < 0) {
+        error_report("Save VM state begin error");
+    }
+    return ret;
+}
+
 static void colo_process_checkpoint(MigrationState *s)
 {
     QIOChannelBuffer *bioc;
@@ -477,6 +482,11 @@ static void colo_process_checkpoint(MigrationState *s)
 
     packets_compare_notifier.notify = colo_compare_notify_checkpoint;
     colo_compare_register_notifier(&packets_compare_notifier);
+
+    ret = colo_prepare_before_save(s);
+    if (ret < 0) {
+        goto out;
+    }
 
     /*
      * Wait for Secondary finish loading VM states and enter COLO
@@ -628,6 +638,17 @@ static void colo_wait_handle_message(QEMUFile *f, int *checkpoint_request,
     }
 }
 
+static int colo_prepare_before_load(QEMUFile *f)
+{
+    int ret;
+
+    ret = qemu_loadvm_state_begin(f);
+    if (ret < 0) {
+        error_report("Load VM state begin error, ret = %d", ret);
+    }
+    return ret;
+}
+
 void *colo_process_incoming_thread(void *opaque)
 {
     MigrationIncomingState *mis = opaque;
@@ -661,6 +682,11 @@ void *colo_process_incoming_thread(void *opaque)
     bioc = qio_channel_buffer_new(COLO_BUFFER_BASE_SIZE);
     fb = qemu_fopen_channel_input(QIO_CHANNEL(bioc));
     object_unref(OBJECT(bioc));
+
+    ret = colo_prepare_before_load(mis->from_src_file);
+    if (ret < 0) {
+        goto out;
+    }
 
     qemu_mutex_lock_iothread();
     replication_start_all(REPLICATION_MODE_SECONDARY, &local_err);
@@ -709,11 +735,6 @@ void *colo_process_incoming_thread(void *opaque)
             goto out;
         }
 
-        ret = qemu_loadvm_state_begin(mis->from_src_file);
-        if (ret < 0) {
-            error_report("Load vm state begin error, ret=%d", ret);
-            goto out;
-        }
         ret = qemu_loadvm_state_main(mis->from_src_file, mis);
         if (ret < 0) {
             error_report("Load VM's live state (ram) error");
