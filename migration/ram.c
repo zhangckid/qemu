@@ -2551,7 +2551,6 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
     bool postcopy_running = postcopy_state_get() >= POSTCOPY_INCOMING_LISTENING;
     /* ADVISE is earlier, it shows the source has the postcopy capability on */
     bool postcopy_advised = postcopy_state_get() >= POSTCOPY_INCOMING_ADVISE;
-    bool need_flush = false;
 
     seq_iter++;
 
@@ -2586,7 +2585,6 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
             /* After going into COLO, we should load the Page into colo_cache */
             if (ram_cache_enable) {
                 host = colo_cache_from_block_offset(block, addr);
-                need_flush = true;
             } else {
                 host = host_from_ram_block_offset(block, addr);
             }
@@ -2694,9 +2692,6 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
     rcu_read_unlock();
     trace_ram_load_complete(ret, seq_iter);
 
-    if (!ret  && ram_cache_enable && need_flush) {
-        colo_flush_ram_cache();
-    }
     return ret;
 }
 
