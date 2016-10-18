@@ -54,6 +54,7 @@
 #include "qemu/cutils.h"
 #include "io/channel-buffer.h"
 #include "io/channel-file.h"
+#include "migration/colo.h"
 
 #ifndef ETH_P_RARP
 #define ETH_P_RARP 0x8035
@@ -1285,13 +1286,20 @@ done:
     return ret;
 }
 
-static int qemu_save_device_state(QEMUFile *f)
+void qemu_savevm_live_state(QEMUFile *f)
+{
+    /* save QEMU_VM_SECTION_END section */
+    qemu_savevm_state_complete_precopy(f, true);
+    qemu_put_byte(f, QEMU_VM_EOF);
+}
+
+int qemu_save_device_state(QEMUFile *f)
 {
     SaveStateEntry *se;
 
-    qemu_put_be32(f, QEMU_VM_FILE_MAGIC);
-    qemu_put_be32(f, QEMU_VM_FILE_VERSION);
-
+    if (!migration_in_colo_state()) {
+        qemu_savevm_state_header(f);
+    }
     cpu_synchronize_all_states();
 
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
@@ -1341,8 +1349,6 @@ enum LoadVMExitCodes {
     /* Allow a command to quit all layers of nested loadvm loops */
     LOADVM_QUIT     =  1,
 };
-
-static int qemu_loadvm_state_main(QEMUFile *f, MigrationIncomingState *mis);
 
 /* ------ incoming postcopy messages ------ */
 /* 'advise' arrives before any transfers just to tell us that a postcopy
@@ -1957,7 +1963,7 @@ qemu_loadvm_section_part_end(QEMUFile *f, MigrationIncomingState *mis)
     return 0;
 }
 
-static int qemu_loadvm_state_main(QEMUFile *f, MigrationIncomingState *mis)
+int qemu_loadvm_state_main(QEMUFile *f, MigrationIncomingState *mis)
 {
     uint8_t section_type;
     int ret = 0;
@@ -2093,6 +2099,40 @@ int qemu_loadvm_state(QEMUFile *f)
     cpu_synchronize_all_post_init();
 
     return ret;
+}
+
+int qemu_loadvm_state_begin(QEMUFile *f)
+{
+    MigrationIncomingState *mis = migration_incoming_get_current();
+    Error *local_err = NULL;
+    int ret;
+
+    if (qemu_savevm_state_blocked(&local_err)) {
+        error_report_err(local_err);
+        return -EINVAL;
+    }
+    /* Load QEMU_VM_SECTION_START section */
+    ret = qemu_loadvm_state_main(f, mis);
+    if (ret < 0) {
+        error_report("Failed to loadvm begin work: %d", ret);
+    }
+    return ret;
+}
+
+int qemu_load_device_state(QEMUFile *f)
+{
+    MigrationIncomingState *mis = migration_incoming_get_current();
+    int ret;
+
+    /* Load QEMU_VM_SECTION_FULL section */
+    ret = qemu_loadvm_state_main(f, mis);
+    if (ret < 0) {
+        error_report("Failed to load device state: %d", ret);
+        return ret;
+    }
+
+    cpu_synchronize_all_post_init();
+    return 0;
 }
 
 int save_vmstate(Monitor *mon, const char *name)
