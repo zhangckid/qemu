@@ -124,6 +124,11 @@ static void primary_vm_do_failover(void)
 
     migrate_set_state(&s->state, MIGRATION_STATUS_COLO,
                       MIGRATION_STATUS_COMPLETED);
+    /* 
+     * kick COLO thread which might wait at 
+     * qemu_sem_wait(&s->colo_checkpoint_sem) 
+     */
+    colo_checkpoint_notify(migrate_get_current());
 
     /*
      * Wake up COLO thread which may blocked in recv() or send(),
@@ -525,7 +530,10 @@ static void colo_process_checkpoint(MigrationState *s)
         if (!colo_shutdown_requested) {
             qemu_sem_wait(&s->colo_checkpoint_sem);
         }
-
+        
+        if (s->state != MIGRATION_STATUS_COLO) {
+            goto out;
+        }
         ret = colo_do_checkpoint_transaction(s, bioc, fb);
         if (ret < 0) {
             goto out;
