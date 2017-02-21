@@ -19,6 +19,7 @@
 #include "qemu/jhash.h"
 #include "qemu/timer.h"
 #include "slirp/tcp.h"
+#include "qemu/event_notifier.h"
 
 #define HASHTABLE_MAX_SIZE 16384
 
@@ -89,4 +90,22 @@ void connection_hashtable_reset(GHashTable *connection_track_table);
 Packet *packet_new(const void *data, int size);
 void packet_destroy(void *opaque, void *user_data);
 
+typedef void FilterNotifierCallback(void *opaque, int value);
+typedef struct FilterNotifier {
+    GSource source;
+    EventNotifier event;
+    GPollFD pfd;
+    FilterNotifierCallback *cb;
+    void *opaque;
+} FilterNotifier;
+
+FilterNotifier *filter_notifier_new(FilterNotifierCallback *cb,
+                    void *opaque, Error **errp);
+int filter_notifier_set(FilterNotifier *notify, uint64_t value);
+int filter_notifier_get(FilterNotifier *notify, uint64_t *value);
+
+enum {
+    COLO_CHECKPOINT = 2,
+    COLO_FAILOVER,
+};
 #endif /* QEMU_COLO_PROXY_H */
