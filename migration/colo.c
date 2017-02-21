@@ -21,8 +21,11 @@
 #include "migration/failover.h"
 #include "replication.h"
 #include "qmp-commands.h"
+#include "net/colo-compare.h"
+#include "net/colo.h"
 
 static bool vmstate_loading;
+static Notifier packets_compare_notifier;
 
 #define COLO_BUFFER_BASE_SIZE (4 * 1024 * 1024)
 
@@ -312,6 +315,7 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
     if (local_err) {
         goto out;
     }
+
     /* Reset channel-buffer directly */
     qio_channel_io_seek(QIO_CHANNEL(bioc), 0, 0, NULL);
     bioc->usage = 0;
@@ -329,6 +333,11 @@ static int colo_do_checkpoint_transaction(MigrationState *s,
      * So we need check failover_request_is_active() again.
      */
     if (failover_get_state() != FAILOVER_STATUS_NONE) {
+        goto out;
+    }
+
+    colo_notify_compares_event(NULL, COLO_CHECKPOINT, &local_err);
+    if (local_err) {
         goto out;
     }
 
@@ -390,6 +399,11 @@ out:
     return ret;
 }
 
+static void colo_compare_notify_checkpoint(Notifier *notifier, void *data)
+{
+    colo_checkpoint_notify(data);
+}
+
 static void colo_process_checkpoint(MigrationState *s)
 {
     QIOChannelBuffer *bioc;
@@ -405,6 +419,9 @@ static void colo_process_checkpoint(MigrationState *s)
         error_report("Open QEMUFile from_dst_file failed");
         goto out;
     }
+
+    packets_compare_notifier.notify = colo_compare_notify_checkpoint;
+    colo_compare_register_notifier(&packets_compare_notifier);
 
     /*
      * Wait for Secondary finish loading VM states and enter COLO
@@ -451,6 +468,7 @@ out:
         qemu_fclose(fb);
     }
 
+    colo_compare_unregister_notifier(&packets_compare_notifier);
     timer_del(s->colo_delay_timer);
 
     /* Hope this not to be too long to wait here */
@@ -548,6 +566,11 @@ void *colo_process_incoming_thread(void *opaque)
     fb = qemu_fopen_channel_input(QIO_CHANNEL(bioc));
     object_unref(OBJECT(bioc));
 
+    qemu_mutex_lock_iothread();
+    vm_start();
+    trace_colo_vm_state_change("stop", "run");
+    qemu_mutex_unlock_iothread();
+
     colo_send_message(mis->to_src_file, COLO_MESSAGE_CHECKPOINT_READY,
                       &local_err);
     if (local_err) {
@@ -566,6 +589,11 @@ void *colo_process_incoming_thread(void *opaque)
             error_report("failover request");
             goto out;
         }
+
+        qemu_mutex_lock_iothread();
+        vm_stop_force_state(RUN_STATE_COLO);
+        trace_colo_vm_state_change("run", "stop");
+        qemu_mutex_unlock_iothread();
 
         /* FIXME: This is unnecessary for periodic checkpoint mode */
         colo_send_message(mis->to_src_file, COLO_MESSAGE_CHECKPOINT_REPLY,
@@ -620,6 +648,8 @@ void *colo_process_incoming_thread(void *opaque)
         }
 
         vmstate_loading = false;
+        vm_start();
+        trace_colo_vm_state_change("stop", "run");
         qemu_mutex_unlock_iothread();
 
         if (failover_get_state() == FAILOVER_STATUS_RELAUNCH) {
