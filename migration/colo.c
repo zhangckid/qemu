@@ -523,6 +523,11 @@ static void colo_process_checkpoint(MigrationState *s)
     qemu_mutex_unlock_iothread();
     trace_colo_vm_state_change("stop", "run");
 
+    ret = global_state_store();
+    if (ret < 0) {
+        goto out;
+    }
+
     timer_mod(s->colo_delay_timer,
             current_time + s->parameters.x_checkpoint_delay);
 
