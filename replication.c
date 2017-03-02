@@ -103,5 +103,6 @@ void replication_stop_all(bool failover, Error **errp)
             error_propagate(errp, local_err);
             return;
         }
+        replication_remove(rs);
     }
 }
