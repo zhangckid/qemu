@@ -575,7 +575,7 @@ out:
     }
 
     timer_del(s->colo_delay_timer);
-
+    timer_free(s->colo_delay_timer);
     /* Hope this not to be too long to wait here */
     qemu_sem_wait(&s->colo_exit_sem);
     qemu_sem_destroy(&s->colo_exit_sem);
