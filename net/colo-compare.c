@@ -520,7 +520,21 @@ static void colo_compare_connection(void *opaque, void *user_data)
              */
             trace_colo_compare_main("packet different");
             g_queue_push_tail(&conn->primary_list, pkt);
-            colo_compare_inconsistent_notify();
+
+            /*
+             * If we have notify_dev that means COLO not
+             * running on KVM(like Xen).
+             */
+            if (s->notify_dev) {
+                char msg[] = "DO_CHECKPOINT";
+                ret = compare_chr_send(&s->chr_notify_dev, (uint8_t *)msg,
+                                       strlen(msg));
+                if (ret < 0) {
+                    error_report("Notify Xen COLO-frame failed");
+                }
+            } else {
+                colo_compare_inconsistent_notify();
+            }
             break;
         }
     }
@@ -792,7 +806,25 @@ static void compare_sec_rs_finalize(SocketReadState *sec_rs)
 
 static void compare_notify_rs_finalize(SocketReadState *notify_rs)
 {
+    CompareState *s = container_of(notify_rs, CompareState, notify_rs);
+
     /* Get Xen colo-frame's notify and handle the message */
+    char *data = g_memdup(notify_rs->buf, notify_rs->packet_len);
+    char msg[] = "COLO_COMPARE_GET_XEN_INIT";
+    int ret;
+
+    if (!strcmp(data, "COLO_USERSPACE_PROXY_INIT")) {
+        ret = compare_chr_send(&s->chr_notify_dev, (uint8_t *)msg,
+                               strlen(msg));
+        if (ret < 0) {
+            error_report("Notify Xen COLO-frame INIT failed");
+        }
+    }
+
+    if (!strcmp(data, "COLO_CHECKPOINT")) {
+        /* colo-compare do checkpoint, flush pri packet and remove sec packet */
+    }
+
 }
 
 /*
