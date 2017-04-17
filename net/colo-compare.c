@@ -282,12 +282,33 @@ static int colo_packet_compare_tcp(Packet *spkt, Packet *ppkt)
         res = -1;
     }
 
-    if (res && trace_event_get_state(TRACE_COLO_COMPARE_MISCOMPARE)) {
+    if (res) {
         char ip_src[20], ip_dst[20];
 
         strcpy(ip_src, inet_ntoa(ppkt->ip->ip_src));
         strcpy(ip_dst, inet_ntoa(ppkt->ip->ip_dst));
 
+        error_report("colo_packet_compare_tcp different");
+        error_report("ip_src: %s  ip_dst: %s ptcp->th_seq: %d \
+                      stcp->th_seq: %d \
+                      ptcp->th_ack: %d \
+                      stcp->th_ack: %d \
+                      res: %d \
+                      ptcp->th_flags: %d \
+                      stcp->th_flags: %d \
+                      ppkt->size: %d \
+                      spkt->size: %d ",
+                      ip_src,
+                      ip_dst,
+                      ntohl(ptcp->th_seq),
+                      ntohl(stcp->th_seq),
+                      ntohl(ptcp->th_ack),
+                      ntohl(stcp->th_ack),
+                      res,
+                      ptcp->th_flags,
+                      stcp->th_flags,
+                      ppkt->size,
+                      spkt->size);
         trace_colo_compare_tcp_info(ip_src,
                                     ip_dst,
                                     ntohl(ptcp->th_seq),
@@ -304,6 +325,8 @@ static int colo_packet_compare_tcp(Packet *spkt, Packet *ppkt)
                      "colo-compare ppkt", ppkt->size);
         qemu_hexdump((char *)spkt->data, stderr,
                      "colo-compare spkt", spkt->size);
+    } else {
+        error_report("colo_packet_compare_tcp same");
     }
 
     return res;
@@ -342,6 +365,14 @@ static int colo_packet_compare_udp(Packet *spkt, Packet *ppkt)
             qemu_hexdump((char *)spkt->data, stderr, "colo-compare sec pkt",
                          spkt->size);
         }
+        error_report("colo_packet_compare_udp different");
+        qemu_hexdump((char *)ppkt->data, stderr, "colo-compare pri pkt",
+                      ppkt->size);
+        qemu_hexdump((char *)spkt->data, stderr, "colo-compare sec pkt",
+                      spkt->size);
+
+    } else {
+        error_report("colo_packet_compare_udp same");
     }
 
     return ret;
@@ -367,6 +398,7 @@ static int colo_packet_compare_icmp(Packet *spkt, Packet *ppkt)
      * other field like TOS,TTL,IP Checksum. we only need to compare
      * the ip payload here.
      */
+
     if (colo_packet_compare_common(ppkt, spkt,
                                    network_header_length + ETH_HLEN)) {
         trace_colo_compare_icmp_miscompare("primary pkt size",
@@ -379,8 +411,14 @@ static int colo_packet_compare_icmp(Packet *spkt, Packet *ppkt)
             qemu_hexdump((char *)spkt->data, stderr, "colo-compare sec pkt",
                          spkt->size);
         }
+        error_report("colo_packet_compare_icmp different");
+        qemu_hexdump((char *)ppkt->data, stderr, "colo-compare pri pkt",
+                      ppkt->size);
+        qemu_hexdump((char *)spkt->data, stderr, "colo-compare sec pkt",
+                      spkt->size);
         return -1;
     } else {
+        error_report("colo_packet_compare_icmp same");
         return 0;
     }
 }
@@ -811,6 +849,7 @@ static void compare_notify_rs_finalize(SocketReadState *notify_rs)
     char msg[] = "COLO_COMPARE_GET_XEN_INIT";
     int ret;
 
+    error_report("compare_notify_rs_finalize:  %s", data);
     if (!strcmp(data, "COLO_USERSPACE_PROXY_INIT")) {
         ret = compare_chr_send(&s->chr_notify_dev, (uint8_t *)msg,
                                strlen(msg));
