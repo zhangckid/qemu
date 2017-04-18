@@ -822,7 +822,7 @@ static void compare_notify_rs_finalize(SocketReadState *notify_rs)
     }
 
     if (!strcmp(data, "COLO_CHECKPOINT")) {
-        /* colo-compare do checkpoint, flush pri packet and remove sec packet */
+        g_queue_foreach(&s->conn_list, colo_flush_packets, s);
     }
 
 }
