@@ -122,7 +122,7 @@ check-unit-y += tests/test-crypto-xts$(EXESUF)
 check-unit-y += tests/test-crypto-block$(EXESUF)
 check-unit-y += tests/test-logging$(EXESUF)
 gcov-files-test-logging-y = util/log.c
-check-unit-$(CONFIG_REPLICATION) += tests/test-replication$(EXESUF)
+#check-unit-$(CONFIG_REPLICATION) += tests/test-replication$(EXESUF)
 check-unit-y += tests/test-bufferiszero$(EXESUF)
 gcov-files-check-bufferiszero-y = util/bufferiszero.c
 check-unit-y += tests/test-uuid$(EXESUF)
@@ -579,7 +579,7 @@ tests/ptimer-test$(EXESUF): tests/ptimer-test.o tests/ptimer-test-stubs.o hw/cor
 
 tests/test-logging$(EXESUF): tests/test-logging.o $(test-util-obj-y)
 
-tests/test-replication$(EXESUF): tests/test-replication.o $(test-util-obj-y) \
+#tests/test-replication$(EXESUF): tests/test-replication.o $(test-util-obj-y) \
 	$(test-block-obj-y)
 
 tests/test-qapi-types.c tests/test-qapi-types.h :\
