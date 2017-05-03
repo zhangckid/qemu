@@ -1384,7 +1384,7 @@ void colo_notify_filters_event(int event, Error **errp)
     QTAILQ_FOREACH(nc, &net_clients, next) {
         peer = nc->peer;
         type = nc->info->type;
-        if (!peer || type != NET_CLIENT_DRIVER_NIC) {
+        if (!peer || type == NET_CLIENT_DRIVER_NIC) {
             continue;
         }
         QTAILQ_FOREACH(nf, &nc->filters, next) {
