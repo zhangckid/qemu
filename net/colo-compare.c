@@ -93,6 +93,8 @@ typedef struct CompareState {
      * element type: Connection
      */
     GQueue conn_list;
+    /* We use this lock protect primary_list and secondary_list */
+    QemuMutex packet_queue_lock;
     /* hashtable to save connection */
     GHashTable *connection_track_table;
     /* compare thread, a thread for each NIC */
@@ -156,6 +158,7 @@ static int packet_enqueue(CompareState *s, int mode)
                           &key,
                           &s->conn_list);
 
+    qemu_mutex_lock(&s->packet_queue_lock);
     if (!conn->processing) {
         g_queue_push_tail(&s->conn_list, conn);
         conn->processing = true;
@@ -188,6 +191,7 @@ static int packet_enqueue(CompareState *s, int mode)
                          "drop packet");
         }
     }
+    qemu_mutex_unlock(&s->packet_queue_lock);
 
     return 0;
 }
@@ -476,6 +480,7 @@ static void colo_compare_connection(void *opaque, void *user_data)
     GList *result = NULL;
     int ret;
 
+    qemu_mutex_lock(&s->packet_queue_lock);
     while (!g_queue_is_empty(&conn->primary_list) &&
            !g_queue_is_empty(&conn->secondary_list)) {
         pkt = g_queue_pop_tail(&conn->primary_list);
@@ -538,6 +543,7 @@ static void colo_compare_connection(void *opaque, void *user_data)
             break;
         }
     }
+    qemu_mutex_unlock(&s->packet_queue_lock);
 }
 
 static int compare_chr_send(CharBackend *out,
@@ -901,6 +907,7 @@ static void colo_compare_complete(UserCreatable *uc, Error **errp)
     QTAILQ_INSERT_TAIL(&net_compares, s, next);
 
     g_queue_init(&s->conn_list);
+    qemu_mutex_init(&s->packet_queue_lock);
 
     s->connection_track_table = g_hash_table_new_full(connection_key_hash,
                                                       connection_key_equal,
@@ -925,6 +932,7 @@ static void colo_flush_packets(void *opaque, void *user_data)
     Connection *conn = opaque;
     Packet *pkt = NULL;
 
+    qemu_mutex_lock(&s->packet_queue_lock);
     while (!g_queue_is_empty(&conn->primary_list)) {
         pkt = g_queue_pop_head(&conn->primary_list);
         compare_chr_send(&s->chr_out, pkt->data, pkt->size);
@@ -934,6 +942,7 @@ static void colo_flush_packets(void *opaque, void *user_data)
         pkt = g_queue_pop_head(&conn->secondary_list);
         packet_destroy(pkt, NULL);
     }
+    qemu_mutex_unlock(&s->packet_queue_lock);
 }
 
 static void colo_compare_class_init(ObjectClass *oc, void *data)
@@ -987,6 +996,7 @@ static void colo_compare_finalize(Object *obj)
     g_queue_foreach(&s->conn_list, colo_flush_packets, s);
 
     g_queue_clear(&s->conn_list);
+    qemu_mutex_destroy(&s->packet_queue_lock);
 
     g_hash_table_destroy(s->connection_track_table);
     g_free(s->pri_indev);
