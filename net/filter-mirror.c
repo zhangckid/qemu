@@ -371,6 +371,22 @@ filter_redirector_set_outdev(Object *obj, const char *value, Error **errp)
     s->outdev = g_strdup(value);
 }
 
+static bool filter_redirector_get_vnet_hdr(Object *obj, Error **errp)
+{
+    MirrorState *s = FILTER_REDIRECTOR(obj);
+
+    return s->vnet_hdr;
+}
+
+static void filter_redirector_set_vnet_hdr(Object *obj,
+                                           bool value,
+                                           Error **errp)
+{
+    MirrorState *s = FILTER_REDIRECTOR(obj);
+
+    s->vnet_hdr = value;
+}
+
 static void filter_mirror_init(Object *obj)
 {
     MirrorState *s = FILTER_MIRROR(obj);
@@ -386,10 +402,17 @@ static void filter_mirror_init(Object *obj)
 
 static void filter_redirector_init(Object *obj)
 {
+    MirrorState *s = FILTER_REDIRECTOR(obj);
+
     object_property_add_str(obj, "indev", filter_redirector_get_indev,
                             filter_redirector_set_indev, NULL);
     object_property_add_str(obj, "outdev", filter_redirector_get_outdev,
                             filter_redirector_set_outdev, NULL);
+
+    s->vnet_hdr = false;
+    object_property_add_bool(obj, "vnet_hdr_support",
+                             filter_redirector_get_vnet_hdr,
+                             filter_redirector_set_vnet_hdr, NULL);
 }
 
 static void filter_mirror_fini(Object *obj)
