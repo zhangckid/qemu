@@ -247,6 +247,12 @@ static int colo_packet_compare_tcp(Packet *spkt, Packet *ppkt)
     ptcp = (struct tcphdr *)ppkt->transport_header;
     stcp = (struct tcphdr *)spkt->transport_header;
 
+    if ((ptcp->th_flags & TH_SYN) != TH_SYN &&
+        ptcp->th_seq != stcp->th_seq) {
+        error_report("colo_packet_compare_tcp seq not same");
+        return -1;
+    }
+
     /*
      * The 'identification' field in the IP header is *very* random
      * it almost never matches.  Fudge this by ignoring differences in
