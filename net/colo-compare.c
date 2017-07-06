@@ -516,7 +516,7 @@ static void colo_compare_connection(void *opaque, void *user_data)
 
     while (!g_queue_is_empty(&conn->primary_list) &&
            !g_queue_is_empty(&conn->secondary_list)) {
-        pkt = g_queue_pop_tail(&conn->primary_list);
+        pkt = g_queue_pop_head(&conn->primary_list);
         if (!pkt) {
             error_report("colo-compare pop pkt failed");
             return;
@@ -560,7 +560,7 @@ static void colo_compare_connection(void *opaque, void *user_data)
              * timeout, it will trigger a checkpoint request.
              */
             trace_colo_compare_main("packet different");
-            g_queue_push_tail(&conn->primary_list, pkt);
+            g_queue_push_head(&conn->primary_list, pkt);
             if (pkt->creation_ms - checkpoint_time_ms > CHECKPOINT_MIN_TIME) {
                 colo_compare_inconsistent_notify();
                 checkpoint_time_ms = pkt->creation_ms;
