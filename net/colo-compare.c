@@ -36,6 +36,8 @@
 #define COLO_COMPARE(obj) \
     OBJECT_CHECK(CompareState, (obj), TYPE_COLO_COMPARE)
 
+static void colo_compare_inconsistent_notify(void);
+
 static QTAILQ_HEAD(, CompareState) net_compares =
        QTAILQ_HEAD_INITIALIZER(net_compares);
 
@@ -44,6 +46,9 @@ static NotifierList colo_compare_notifiers =
 
 #define COMPARE_READ_LEN_MAX NET_BUFSIZE
 #define MAX_QUEUE_SIZE 1024
+
+#define COLO_COMPARE_FREE_PRIMARY     0x01
+#define COLO_COMPARE_FREE_SECONDARY   0x02
 
 /* TODO: Should be configurable */
 #define REGULAR_PACKET_CHECK_MS 3000
@@ -128,14 +133,32 @@ static gint seq_sorter(Packet *a, Packet *b, gpointer data)
     return ntohl(atcp->th_seq) - ntohl(btcp->th_seq);
 }
  
+static void fill_pkt_tcp_info(void *data, uint32_t *max_ack)
+{
+    Packet *pkt = data;
+    struct tcphdr *tcphd;
+
+    tcphd = (struct tcphdr *)pkt->transport_header;
+
+    pkt->tcp_seq = ntohl(tcphd->th_seq);
+    pkt->tcp_ack = ntohl(tcphd->th_ack);
+    *max_ack = *max_ack > pkt->tcp_ack ? *max_ack : pkt->tcp_ack;
+    pkt->header_size = pkt->transport_header - (uint8_t *)pkt->data
+                       + (tcphd->th_off << 2) - pkt->vnet_hdr_len;
+    pkt->payload_size = pkt->size - pkt->header_size;
+    pkt->seq_end = pkt->tcp_seq + pkt->payload_size;
+    pkt->flags = tcphd->th_flags;
+}
+
 /*
  * Return 1 on success, if return 0 means the
  * packet will be dropped
  */
-static int colo_insert_packet(GQueue *queue, Packet *pkt)
+static int colo_insert_packet(GQueue *queue, Packet *pkt, uint32_t *max_ack)
 {
     if (g_queue_get_length(queue) <= MAX_QUEUE_SIZE) {
         if (pkt->ip->ip_p == IPPROTO_TCP) {
+            fill_pkt_tcp_info(pkt, max_ack);
             g_queue_insert_sorted(queue,
                                   pkt,
                                   (GCompareDataFunc)seq_sorter,
@@ -185,12 +208,12 @@ static int packet_enqueue(CompareState *s, int mode, Connection **con)
     }
 
     if (mode == PRIMARY_IN) {
-        if (!colo_insert_packet(&conn->primary_list, pkt)) {
+        if (!colo_insert_packet(&conn->primary_list, pkt, &conn->pack)) {
             error_report("colo compare primary queue size too big,"
                          "drop packet");
         }
     } else {
-        if (!colo_insert_packet(&conn->primary_list, pkt)) {
+        if (!colo_insert_packet(&conn->secondary_list, pkt, &conn->sack)) {
             error_report("colo compare primary queue size too big,"
                          "drop packet");
         }
@@ -198,6 +221,192 @@ static int packet_enqueue(CompareState *s, int mode, Connection **con)
     *con = conn;
 
     return 0;
+}
+
+static inline bool after(uint32_t seq1, uint32_t seq2)
+{
+        return (int32_t)(seq1 - seq2) > 0;
+}
+                         
+static void colo_release_primary_pkt(CompareState *s, Packet *pkt)
+{
+    int ret;
+    ret = compare_chr_send(s,
+                           pkt->data,
+                           pkt->size,
+                           pkt->vnet_hdr_len);
+    if (ret < 0) {
+        error_report("colo send primary packet failed");
+    }
+    trace_colo_compare_main("packet same and release packet");
+    packet_destroy(pkt, NULL);
+}
+
+static bool colo_compare_payload(Packet *ppkt, Packet *spkt,
+                                uint16_t poff, uint16_t soff,
+                                uint16_t len)
+{
+    if(memcmp(ppkt->data + poff, spkt->data + soff, len)) {
+        printf("compare data inconsist\n");
+        return false;
+    }
+    return true;
+}
+
+/*
+ * return true means that the payload is consist and
+ * need to make the next comparison, false means do
+ * the checkpoint
+*/
+static bool colo_mark_tcp_pkt(Packet *ppkt, Packet *spkt,
+                              int8_t *mark, uint32_t max_ack)
+{
+    *mark = 0;
+
+    if (ppkt->tcp_seq == spkt->tcp_seq && ppkt->seq_end == spkt->seq_end) {
+        if (colo_compare_payload(ppkt, spkt,
+                                 ppkt->header_size, spkt->header_size,
+                                 ppkt->payload_size)) {
+            *mark = COLO_COMPARE_FREE_SECONDARY | COLO_COMPARE_FREE_PRIMARY;
+            return true;
+        }
+    }
+    /* one part of secondary packet payload still need to be compared */
+    if (!after(ppkt->seq_end, spkt->seq_end)) {
+        if (colo_compare_payload(ppkt, spkt,
+                                 ppkt->header_size + ppkt->offset,
+                                 spkt->header_size + spkt->offset,
+                                 ppkt->payload_size - ppkt->offset)) {
+            if (!after(ppkt->tcp_ack, max_ack)) {
+                *mark = COLO_COMPARE_FREE_PRIMARY;
+                spkt->offset += ppkt->payload_size - ppkt->offset;
+                return true;
+            } else {
+                /* secondary guest hasn't ack the data, don't send
+                 * out this packet
+                 */
+                return false;
+            }
+        }
+    } else {
+        /* primary packet is longer than secondary packet, compare
+         * the same part and mark the primary packet offset
+         */
+        if (colo_compare_payload(ppkt, spkt,
+                                 ppkt->header_size + ppkt->offset,
+                                 spkt->header_size + spkt->offset,
+                                 spkt->payload_size - spkt->offset)) {
+            *mark = COLO_COMPARE_FREE_SECONDARY;
+            ppkt->offset += spkt->payload_size - spkt->offset;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void colo_compare_tcp(CompareState *s, Connection *conn)
+{
+    Packet *ppkt = NULL, *spkt = NULL;
+    int8_t mark;
+    static int64_t mcheckpoint_time_ms = 0;
+ 
+    /*
+     * If ppkt and spkt have the same payload, but ppkt's ack
+     * is greater than spkt's ack, in this case we can not
+     * send the ppkt becaue it will cause the secondary guest
+     * to miss sending some data in the next. Therefore, we
+     * record the maximum ack in the current queue at both
+     * primary side and secondary side. Only when the ack is
+     * less than the smaller of the two maximum ack, then we
+     * can ensure that the packet's payload is acked by primary
+     * and secondary.
+    */
+    uint32_t min_ack = conn->pack > conn->sack ? conn->sack : conn->pack;
+
+pri:
+    if (g_queue_is_empty(&conn->primary_list)) {
+        return;
+    }
+    ppkt = g_queue_pop_head(&conn->primary_list);
+sec:
+    if (g_queue_is_empty(&conn->secondary_list)) {
+        g_queue_push_head(&conn->primary_list, ppkt);
+        return;
+    }
+    spkt = g_queue_pop_head(&conn->secondary_list);
+
+    if (ppkt->tcp_seq == ppkt->seq_end) {
+        colo_release_primary_pkt(s, ppkt);
+        ppkt = NULL;
+    }
+    if (ppkt && conn->compare_seq && !after(ppkt->seq_end, conn->compare_seq)) {
+        trace_colo_compare_main("pri: this packet has compared");
+        colo_release_primary_pkt(s, ppkt);
+        ppkt = NULL;
+    }
+    if (spkt->tcp_seq == spkt->seq_end) {
+        packet_destroy(spkt, NULL);
+        if (!ppkt) {
+            goto pri;
+        } else {
+            goto sec;
+        }
+    } else {
+        if (conn->compare_seq && !after(spkt->seq_end, conn->compare_seq)) {
+            trace_colo_compare_main("sec: this packet has compared");
+            colo_release_primary_pkt(s, spkt);
+            if (!ppkt) {
+                goto pri;
+            } else {
+                goto sec;
+            }
+        }
+        if (!ppkt) {
+            g_queue_push_head(&conn->secondary_list, spkt);
+            goto pri;
+        }
+    }
+    if (colo_mark_tcp_pkt(ppkt, spkt, &mark, min_ack)) {
+        trace_colo_compare_tcp_info("pri",
+                                    ppkt->tcp_seq, ppkt->tcp_ack,
+                                    ppkt->header_size, ppkt->payload_size,
+                                    ppkt->offset, ppkt->flags);
+
+        trace_colo_compare_tcp_info("sec",
+                                    spkt->tcp_seq, spkt->tcp_ack,
+                                    spkt->header_size, spkt->payload_size,
+                                    spkt->offset, spkt->flags);
+
+        if (mark == COLO_COMPARE_FREE_PRIMARY) {
+            conn->compare_seq = ppkt->seq_end;
+            colo_release_primary_pkt(s, ppkt);
+            g_queue_push_head(&conn->secondary_list, spkt);
+            goto pri;
+        }
+        if (mark == COLO_COMPARE_FREE_SECONDARY) {
+            conn->compare_seq = spkt->seq_end;
+            packet_destroy(spkt, NULL);
+            goto sec;
+        }
+        if (mark == (COLO_COMPARE_FREE_PRIMARY | COLO_COMPARE_FREE_SECONDARY)) {
+            conn->compare_seq = ppkt->seq_end;
+            colo_release_primary_pkt(s, ppkt);
+            packet_destroy(spkt, NULL);
+            goto pri;
+        }
+    } else {
+        g_queue_push_head(&conn->primary_list, ppkt);
+        g_queue_push_head(&conn->secondary_list, spkt);
+        if (ppkt->creation_ms - mcheckpoint_time_ms > 3000) {
+            mcheckpoint_time_ms = ppkt->creation_ms;
+            colo_compare_inconsistent_notify();
+        }
+        /*
+         * colo_compare_inconsistent_notify();
+         * TODO: notice to checkpoint();
+         */
+    }
 }
 
 /*
@@ -244,6 +453,7 @@ static int colo_packet_compare_common(Packet *ppkt,
     }
 }
 
+#if 0
 /*
  * Called from the compare thread on the primary
  * for compare tcp packet
@@ -335,6 +545,7 @@ static int colo_packet_compare_tcp(Packet *spkt, Packet *ppkt)
 
     return res;
 }
+#endif
 
 /*
  * Called from the compare thread on the primary
@@ -493,6 +704,41 @@ static void colo_old_packet_check(void *opaque)
 
     g_queue_foreach(&s->conn_list, colo_old_packet_check_one_conn, NULL);
 }
+#if 1
+static void colo_compare_packet(CompareState *s, Connection *conn,
+                                int (*HandlePacket)(Packet *spkt,
+                                Packet *ppkt))
+{
+    Packet *pkt = NULL;
+    GList *result = NULL;
+    static int64_t checkpoint_time_ms = 0;
+
+    while (!g_queue_is_empty(&conn->primary_list) &&
+           !g_queue_is_empty(&conn->secondary_list)) {
+        pkt = g_queue_pop_head(&conn->primary_list);
+        result = g_queue_find_custom(&conn->secondary_list,
+                 pkt, (GCompareFunc)HandlePacket);
+
+        if (result) {
+            colo_release_primary_pkt(s, pkt);
+            g_queue_remove(&conn->secondary_list, result->data);
+        } else {
+            /*
+             * If one packet arrive late, the secondary_list or
+             * primary_list will be empty, so we can't compare it
+             * until next comparison.
+             */
+            trace_colo_compare_main("packet different");
+            g_queue_push_head(&conn->primary_list, pkt);
+            /* TODO: colo_notify_checkpoint();*/
+            if (pkt->creation_ms - checkpoint_time_ms > 3000) {
+                colo_compare_inconsistent_notify();
+                checkpoint_time_ms = pkt->creation_ms;
+            }
+            break;
+        }
+    }
+}
 
 /*
  * Called from the compare thread on the primary
@@ -505,10 +751,37 @@ static void colo_compare_connection(void *opaque, void *user_data)
 {
     CompareState *s = user_data;
     Connection *conn = opaque;
+
+    switch (conn->ip_proto) {
+        case IPPROTO_TCP:
+            colo_compare_tcp(s, conn);
+            break;
+        case IPPROTO_UDP:
+            colo_compare_packet(s, conn, colo_packet_compare_udp);
+            break;
+        case IPPROTO_ICMP:
+            colo_compare_packet(s, conn, colo_packet_compare_icmp);
+            break;
+        default:
+            colo_compare_packet(s, conn, colo_packet_compare_other);
+            break;
+    }
+}
+#endif
+
+#if 0
+static void colo_compare_connection(void *opaque, void *user_data)
+{
+    CompareState *s = user_data;
+    Connection *conn = opaque;
     Packet *pkt = NULL;
     GList *result = NULL;
-    int ret;
     static int64_t checkpoint_time_ms = 0;
+
+    if (conn->ip_proto == IPPROTO_TCP) {
+        colo_compare_tcp(s, conn);
+        return;
+    }
 
     while (!g_queue_is_empty(&conn->primary_list) &&
            !g_queue_is_empty(&conn->secondary_list)) {
@@ -519,10 +792,6 @@ static void colo_compare_connection(void *opaque, void *user_data)
         }
 
         switch (conn->ip_proto) {
-        case IPPROTO_TCP:
-            result = g_queue_find_custom(&conn->secondary_list,
-                     pkt, (GCompareFunc)colo_packet_compare_tcp);
-            break;
         case IPPROTO_UDP:
             result = g_queue_find_custom(&conn->secondary_list,
                      pkt, (GCompareFunc)colo_packet_compare_udp);
@@ -538,16 +807,8 @@ static void colo_compare_connection(void *opaque, void *user_data)
         }
 
         if (result) {
-            ret = compare_chr_send(s,
-                                   pkt->data,
-                                   pkt->size,
-                                   pkt->vnet_hdr_len);
-            if (ret < 0) {
-                error_report("colo_send_primary_packet failed");
-            }
-            trace_colo_compare_main("packet same and release packet");
+            colo_release_primary_pkt(s, pkt);
             g_queue_remove(&conn->secondary_list, result->data);
-            packet_destroy(pkt, NULL);
         } else {
             /*
              * If one packet arrive late, the secondary_list or
@@ -565,7 +826,7 @@ static void colo_compare_connection(void *opaque, void *user_data)
         }
     }
 }
-
+#endif
 static int compare_chr_send(CompareState *s,
                             const uint8_t *buf,
                             uint32_t size,
