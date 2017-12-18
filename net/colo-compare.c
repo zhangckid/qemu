@@ -127,12 +127,32 @@ static gint seq_sorter(Packet *a, Packet *b, gpointer data)
     btcp = (struct tcphdr *)(b->transport_header);
     return ntohl(atcp->th_seq) - ntohl(btcp->th_seq);
 }
+ 
+/*
+ * Return 1 on success, if return 0 means the
+ * packet will be dropped
+ */
+static int colo_insert_packet(GQueue *queue, Packet *pkt)
+{
+    if (g_queue_get_length(queue) <= MAX_QUEUE_SIZE) {
+        if (pkt->ip->ip_p == IPPROTO_TCP) {
+            g_queue_insert_sorted(queue,
+                                  pkt,
+                                  (GCompareDataFunc)seq_sorter,
+                                  NULL);
+        } else {
+            g_queue_push_tail(queue, pkt);
+        }
+        return 1;
+    }
+    return 0;
+}
 
 /*
  * Return 0 on success, if return -1 means the pkt
  * is unsupported(arp and ipv6) and will be sent later
  */
-static int packet_enqueue(CompareState *s, int mode)
+static int packet_enqueue(CompareState *s, int mode, Connection **con)
 {
     ConnectionKey key;
     Packet *pkt = NULL;
@@ -165,32 +185,17 @@ static int packet_enqueue(CompareState *s, int mode)
     }
 
     if (mode == PRIMARY_IN) {
-        if (g_queue_get_length(&conn->primary_list) <=
-                               MAX_QUEUE_SIZE) {
-            g_queue_push_tail(&conn->primary_list, pkt);
-            if (conn->ip_proto == IPPROTO_TCP) {
-                g_queue_sort(&conn->primary_list,
-                             (GCompareDataFunc)seq_sorter,
-                             NULL);
-            }
-        } else {
+        if (!colo_insert_packet(&conn->primary_list, pkt)) {
             error_report("colo compare primary queue size too big,"
                          "drop packet");
         }
     } else {
-        if (g_queue_get_length(&conn->secondary_list) <=
-                               MAX_QUEUE_SIZE) {
-            g_queue_push_tail(&conn->secondary_list, pkt);
-            if (conn->ip_proto == IPPROTO_TCP) {
-                g_queue_sort(&conn->secondary_list,
-                             (GCompareDataFunc)seq_sorter,
-                             NULL);
-            }
-        } else {
-            error_report("colo compare secondary queue size too big,"
+        if (!colo_insert_packet(&conn->primary_list, pkt)) {
+            error_report("colo compare primary queue size too big,"
                          "drop packet");
         }
     }
+    *con = conn;
 
     return 0;
 }
@@ -802,8 +807,9 @@ static void compare_set_vnet_hdr(Object *obj,
 static void compare_pri_rs_finalize(SocketReadState *pri_rs)
 {
     CompareState *s = container_of(pri_rs, CompareState, pri_rs);
+    Connection *conn = NULL;
 
-    if (packet_enqueue(s, PRIMARY_IN)) {
+    if (packet_enqueue(s, PRIMARY_IN, &conn)) {
         trace_colo_compare_main("primary: unsupported packet in");
         compare_chr_send(s,
                          pri_rs->buf,
@@ -811,19 +817,20 @@ static void compare_pri_rs_finalize(SocketReadState *pri_rs)
                          pri_rs->vnet_hdr_len);
     } else {
         /* compare connection */
-        g_queue_foreach(&s->conn_list, colo_compare_connection, s);
+        colo_compare_connection(conn, s);
     }
 }
 
 static void compare_sec_rs_finalize(SocketReadState *sec_rs)
 {
     CompareState *s = container_of(sec_rs, CompareState, sec_rs);
+    Connection *conn = NULL;
 
-    if (packet_enqueue(s, SECONDARY_IN)) {
+    if (packet_enqueue(s, SECONDARY_IN, &conn)) {
         trace_colo_compare_main("secondary: unsupported packet in");
     } else {
         /* compare connection */
-        g_queue_foreach(&s->conn_list, colo_compare_connection, s);
+        colo_compare_connection(conn, s);
     }
 }
 
