@@ -2846,7 +2846,8 @@ static bool object_create_initial(const char *type, QemuOpts *opts)
         g_str_equal(type, "filter-redirector") ||
         g_str_equal(type, "colo-compare") ||
         g_str_equal(type, "filter-rewriter") ||
-        g_str_equal(type, "filter-replay")) {
+        g_str_equal(type, "filter-replay") ||
+        g_str_equal(type, "heartbeat")) {
         return false;
     }
 
