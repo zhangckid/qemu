@@ -35,15 +35,19 @@
 #define HEARTBEAT_PULSE_INTERVAL_DEFAULT 5000
 /* Default heartbeat timeout */
 #define HEARTBEAT_TIMEOUT_DEFAULT 2000
+#define DO_CLOSE_NBD_SERVER "nbd_server_stop\n"
+#define DO_FAILOVER "x_colo_lost_heartbeat\n"
 
 typedef struct HeartbeatState {
     Object parent;
 
     bool server;
     char *heartbeat_node;
+    char *timeout_node;
     uint32_t pulse_interval;
     uint32_t timeout;
     CharBackend chr_heartbeat_node;
+    CharBackend chr_timeout_node;
     SocketReadState heartbeat_rs;
 
     QEMUTimer *pulse_timer;
@@ -122,7 +126,22 @@ static void heartbeat_regular_pulse(void *opaque)
 
 static void heartbeat_timeout(void *opaque)
 {
-    failover_request_active(NULL);
+    HeartbeatState *s = opaque;
+    int ret = 0;
+
+    ret = qemu_chr_fe_write_all(&s->chr_timeout_node, (uint8_t *)DO_CLOSE_NBD_SERVER,
+                                strlen(DO_CLOSE_NBD_SERVER));
+    if (ret) {
+        error_report("heartbeat_timeout DO_CLOSE_NBD_SERVER notify fail");
+    }
+
+    ret = qemu_chr_fe_write_all(&s->chr_timeout_node, (uint8_t *)DO_FAILOVER,
+                                strlen(DO_FAILOVER));
+    if (ret) {
+        error_report("heartbeat_timeout DO_FAILOVER notify fail");
+    }
+
+    return;
 }
 
 static void heartbeat_timer_init(HeartbeatState *s)
@@ -175,6 +194,21 @@ static void heartbeat_set_node(Object *obj, const char *value, Error **errp)
 
     g_free(s->heartbeat_node);
     s->heartbeat_node = g_strdup(value);
+}
+
+static char *timeout_get_node(Object *obj, Error **errp)
+{
+    HeartbeatState *s = HEARTBEAT(obj);
+
+    return g_strdup(s->timeout_node);
+}
+
+static void timeout_set_node(Object *obj, const char *value, Error **errp)
+{
+    HeartbeatState *s = HEARTBEAT(obj);
+
+    g_free(s->timeout_node);
+    s->timeout_node = g_strdup(value);
 }
 
 static bool heartbeat_get_server(Object *obj, Error **errp)
@@ -311,14 +345,19 @@ static void heartbeat_complete(UserCreatable *uc, Error **errp)
     HeartbeatState *s = HEARTBEAT(uc);
     Chardev *chr;
 
-    if (!s->heartbeat_node || !s->iothread) {
-        error_setg(errp, "heartbeat needs 'heartbeat_node' and 'server' "
-                   " property set");
+    if (!s->heartbeat_node || !s->iothread || !s->timeout_node) {
+        error_setg(errp, "heartbeat needs 'heartbeat_node', 'timeout_node' "
+                   "and 'server'  property set");
         return;
     }
 
     if (find_and_check_chardev(&chr, s->heartbeat_node, errp) ||
         !qemu_chr_fe_init(&s->chr_heartbeat_node, chr, errp)) {
+        return;
+    }
+
+    if (find_and_check_chardev(&chr, s->timeout_node, errp) ||
+        !qemu_chr_fe_init(&s->chr_timeout_node, chr, errp)) {
         return;
     }
 
@@ -344,6 +383,10 @@ static void heartbeat_init(Object *obj)
                             heartbeat_get_node, heartbeat_set_node,
                             NULL);
 
+    object_property_add_str(obj, "timeout_node",
+                            timeout_get_node, timeout_set_node,
+                            NULL);
+
     object_property_add_bool(obj, "server",
                              heartbeat_get_server,
                              heartbeat_set_server, NULL);
@@ -367,12 +410,14 @@ static void heartbeat_finalize(Object *obj)
     HeartbeatState *s = HEARTBEAT(obj);
 
     qemu_chr_fe_deinit(&s->chr_heartbeat_node, false);
+    qemu_chr_fe_deinit(&s->chr_timeout_node, false);
 
     if (s->iothread) {
         heartbeat_timer_del(s);
     }
 
     g_free(s->heartbeat_node);
+    g_free(s->timeout_node);
 }
 
 static const TypeInfo heartbeat_info = {
