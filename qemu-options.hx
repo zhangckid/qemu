@@ -4541,7 +4541,7 @@ Advanced Watch Dog is an universal monitoring module on VMM side, it can be used
 for example: send message to admin, notify another VMM, send qmp command to qemu do some operation like restart the VM, build VMM heartbeat system, etc.
 It make user have basic VM/Host network monitoring tools and basic false tolerance and recovery solution.
 
-@item -object colo-compare,id=@var{id},primary_in=@var{chardevid},secondary_in=@var{chardevid},outdev=@var{chardevid},iothread=@var{id}[,vnet_hdr_support][,notify_dev=@var{id}]
+@item -object colo-compare,id=@var{id},primary_in=@var{chardevid},secondary_in=@var{chardevid},outdev=@var{chardevid},iothread=@var{id}[,vnet_hdr_support][,notify_dev=@var{id}][,compare_timeout=@var{ms}]
 
 Colo-compare gets packet from primary_in@var{chardevid} and secondary_in@var{chardevid}, than compare primary packet with
 secondary packet. If the packets are same, we will output primary
@@ -4549,7 +4549,8 @@ packet to outdev@var{chardevid}, else we will notify colo-frame
 do checkpoint and send primary packet to outdev@var{chardevid}.
 In order to improve efficiency, we need to put the task of comparison
 in another thread. If it has the vnet_hdr_support flag, colo compare
-will send/recv packet with vnet_hdr_len.
+will send/recv packet with vnet_hdr_len.Then compare_timeout=@var{ms}
+determines the maximum delay colo-compare wait for the packet.
 If you want to use Xen COLO, will need the notify_dev to notify Xen
 colo-frame to do checkpoint.
 
