@@ -2072,7 +2072,7 @@ static int loadvm_handle_recv_bitmap(MigrationIncomingState *mis,
 static int loadvm_process_enable_colo(MigrationIncomingState *mis)
 {
     migration_incoming_enable_colo();
-    return colo_init_ram_cache();
+    return 0;
 }
 
 /*
