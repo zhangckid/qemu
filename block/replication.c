@@ -730,6 +730,8 @@ static BlockDriver bdrv_replication = {
     .bdrv_co_readv              = replication_co_readv,
     .bdrv_co_writev             = replication_co_writev,
 
+    .bdrv_co_block_status       = bdrv_co_block_status_from_file,
+
     .is_filter                  = true,
     .bdrv_recurse_is_first_non_filter = replication_recurse_is_first_non_filter,
 

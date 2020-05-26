@@ -1115,6 +1115,22 @@ static char *quorum_dirname(BlockDriverState *bs, Error **errp)
     return NULL;
 }
 
+static int coroutine_fn quorum_co_block_status(BlockDriverState *bs,
+                                               bool want_zero,
+                                               int64_t offset,
+                                               int64_t bytes,
+                                               int64_t *pnum,
+                                               int64_t *map,
+                                               BlockDriverState **file)
+{
+    BDRVQuorumState *s = bs->opaque;
+    assert(s->children[0] && s->children[0]->bs);
+    *pnum = bytes;
+    *map = offset;
+    *file = s->children[0]->bs;
+    return BDRV_BLOCK_RAW | BDRV_BLOCK_OFFSET_VALID;
+}
+
 static const char *const quorum_strong_runtime_opts[] = {
     QUORUM_OPT_VOTE_THRESHOLD,
     QUORUM_OPT_BLKVERIFY,
@@ -1145,6 +1161,8 @@ static BlockDriver bdrv_quorum = {
     .bdrv_del_child                     = quorum_del_child,
 
     .bdrv_child_perm                    = bdrv_filter_default_perms,
+
+    .bdrv_co_block_status               = quorum_co_block_status,
 
     .is_filter                          = true,
     .bdrv_recurse_is_first_non_filter   = quorum_recurse_is_first_non_filter,
