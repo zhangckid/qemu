@@ -1061,6 +1061,7 @@ static void quorum_del_child(BlockDriverState *bs, BdrvChild *child,
             (s->num_children - i - 1) * sizeof(BdrvChild *));
     s->children = g_renew(BdrvChild *, s->children, --s->num_children);
     bdrv_unref_child(bs, child);
+    s->next_child_index--;
 
     bdrv_drained_end(bs);
 }
